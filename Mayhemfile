@@ -1,0 +1,7 @@
+project: rnshah9/sysrepo
+target: sysrepocfg
+tests: null
+
+cmds:
+  - cmd: /repo/build/sysrepocfg -C @@
+    filepath: /test.xml
