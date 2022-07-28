@@ -5,20 +5,16 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake git 
 
 RUN git clone https://github.com/CESNET/libyang
 WORKDIR /libyang/build
-RUN cmake ..
+RUN cmake .. -DCMAKE_INSTALL_PREFIX=/install
 RUN make -j8
 RUN make install
 
 COPY . /repo
 WORKDIR /repo/build
-RUN cmake ..
+RUN cmake .. -DCMAKE_INSTALL_PREFIX=/install
 RUN make -j8
-
-RUN mkdir -p /deps
-RUN ldd /repo/build/sysrepocfg | tr -s '[:blank:]' '\n' | grep '^/' | xargs -I % sh -c 'cp % /deps;'
+RUN make install
 
 FROM ubuntu:22.04 as package
-
-COPY --from=builder /deps /deps
-COPY --from=builder /repo/build/sysrepocfg /repo/build/sysrepocfg
-ENV LD_LIBRARY_PATH=/deps
+COPY --from=builder /install /install
+ENV LD_LIBRARY_PATH=/install/lib

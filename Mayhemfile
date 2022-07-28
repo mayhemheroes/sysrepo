@@ -2,5 +2,4 @@ project: sysrepo
 target: sysrepocfg
 
 cmds:
-  - cmd: /repo/build/sysrepocfg -C /test.xml
-    filepath: /test.xml
+  - cmd: /install/bin/sysrepocfg -C @@
