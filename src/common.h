@@ -79,6 +79,9 @@ struct srplg_ntf_s;
 /** timeout for locking connection remap lock; maximum time it can be continuously read/written to (ms) */
 #define SR_CONN_REMAP_LOCK_TIMEOUT 10000
 
+/** timeout for write-locking module cache (ms) */
+#define SR_CONN_RUN_CACHE_LOCK_TIMEOUT 1000
+
 /** timeout for locking (data of) a module; maximum time a module write lock is expected to be held (ms) */
 #define SR_MOD_LOCK_TIMEOUT 5000
 
@@ -90,9 +93,6 @@ struct srplg_ntf_s;
 
 /** timeout for locking SHM module/RPC subscriptions; maxmum time full event processing may take (ms) */
 #define SR_SHMEXT_SUB_LOCK_TIMEOUT 15000
-
-/** timeout for locking module cache (ms) */
-#define SR_MOD_CACHE_LOCK_TIMEOUT 10000
 
 /** default timeout for change subscription callback (ms) */
 #define SR_CHANGE_CB_TIMEOUT 5000
@@ -367,10 +367,11 @@ sr_error_info_t *sr_subscr_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, s
  * @param[in] mod_name Module name.
  * @param[out] notif_subs Notification subscriptions.
  * @param[out] notif_sub_count Number of subscribers.
+ * @param[out] sub_cid Optional CID of the first subscriber.
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_notif_find_subscriber(sr_conn_ctx_t *conn, const char *mod_name, sr_mod_notif_sub_t **notif_subs,
-        uint32_t *notif_sub_count);
+        uint32_t *notif_sub_count, sr_cid_t *sub_cid);
 
 /**
  * @brief Call notification callback for a notification.
@@ -465,12 +466,15 @@ sr_error_info_t *sr_ptr_del(pthread_mutex_t *ptr_lock, void ***ptrs, uint32_t *p
 /**
  * @brief Create a new libyang context.
  *
+ * @param[in] opts Connection options.
  * @param[in] ext_cb LY ext data cb to use.
  * @param[in] ext_cb_data LY ext data cb data to use.
+ * @param[in] ext_searchdir LY ext data searchdir.
  * @param[out] ly_ctx libyang context.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_ly_ctx_init(ly_ext_data_clb ext_cb, void *ext_cb_data, struct ly_ctx **ly_ctx);
+sr_error_info_t *sr_ly_ctx_init(sr_conn_options_t opts, ly_ext_data_clb ext_cb, void *ext_cb_data,
+        const char *ext_searchdir, struct ly_ctx **ly_ctx);
 
 /**
  * @brief Initialize all dynamic DS handles.
@@ -1360,6 +1364,15 @@ sr_error_info_t *sr_xpath_get_text_atoms(const char *xpath, sr_xp_atoms_t **xp_a
  * @param[in] xp_atoms Atoms structure to free.
  */
 void sr_xpath_atoms_free(sr_xp_atoms_t *xp_atoms);
+
+/**
+ * @brief Check whether an atom (node) is foreign with respect to the expression.
+ *
+ * @param[in] atom Node to check.
+ * @param[in] top_node Top-level node for the expression.
+ * @return Foreign dependency module, NULL if atom is not foreign.
+ */
+struct lys_module *sr_ly_atom_is_foreign(const struct lysc_node *atom, const struct lysc_node *top_node);
 
 /**
  * @brief Find last (most nested) parent (node with possible children) in a data tree.

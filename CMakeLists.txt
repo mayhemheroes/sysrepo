@@ -64,21 +64,21 @@ endif()
 # micro version is changed with a set of small changes or bugfixes anywhere in the project.
 set(SYSREPO_MAJOR_VERSION 2)
 set(SYSREPO_MINOR_VERSION 1)
-set(SYSREPO_MICRO_VERSION 64)
+set(SYSREPO_MICRO_VERSION 84)
 set(SYSREPO_VERSION ${SYSREPO_MAJOR_VERSION}.${SYSREPO_MINOR_VERSION}.${SYSREPO_MICRO_VERSION})
 
 # Version of the library
 # Major version is changed with every backward non-compatible API/ABI change, minor version changes
 # with backward compatible change and micro version is connected with any internal change of the library.
 set(SYSREPO_MAJOR_SOVERSION 7)
-set(SYSREPO_MINOR_SOVERSION 6)
-set(SYSREPO_MICRO_SOVERSION 6)
+set(SYSREPO_MINOR_SOVERSION 8)
+set(SYSREPO_MICRO_SOVERSION 10)
 set(SYSREPO_SOVERSION_FULL ${SYSREPO_MAJOR_SOVERSION}.${SYSREPO_MINOR_SOVERSION}.${SYSREPO_MICRO_SOVERSION})
 set(SYSREPO_SOVERSION ${SYSREPO_MAJOR_SOVERSION})
 
 # Version of libyang library that this sysrepo depends on
-set(LIBYANG_DEP_VERSION 2.0.178)
-set(LIBYANG_DEP_SOVERSION 2.20.2)
+set(LIBYANG_DEP_VERSION 2.0.228)
+set(LIBYANG_DEP_SOVERSION 2.22.1)
 set(LIBYANG_DEP_SOVERSION_MAJOR 2)
 
 # generate only version header, it is needed for docs
@@ -390,6 +390,7 @@ install(TARGETS sysrepoctl sysrepocfg sysrepo-plugind DESTINATION ${CMAKE_INSTAL
 install(FILES ${PROJECT_SOURCE_DIR}/src/executables/sysrepoctl.1 ${PROJECT_SOURCE_DIR}/src/executables/sysrepocfg.1
         DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
 install(FILES ${PROJECT_SOURCE_DIR}/src/executables/sysrepo-plugind.8 DESTINATION ${CMAKE_INSTALL_MANDIR}/man8)
+install(DIRECTORY DESTINATION ${SRPD_PLUGINS_PATH})
 if(SR_HAVE_SYSTEMD)
     install(FILES ${PROJECT_BINARY_DIR}/sysrepo-plugind.service DESTINATION ${SYSTEMD_UNIT_DIR})
 endif()

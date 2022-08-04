@@ -195,11 +195,22 @@ uint32_t sr_get_content_id(sr_conn_ctx_t *conn);
  * @brief Set libyang extension data callback for the connection. Even if the context is recompiled,
  * the callback will be used.
  *
+ * @note If using schema-mount, to specify directory with the mounted YANG modules, use ::sr_set_ext_data_searchdir().
+ *
  * @param[in] conn Connection to use.
  * @param[in] cb Libyang ext data callback.
  * @param[in] user_data User data passed to @p cb.
  */
 void sr_set_ext_data_cb(sr_conn_ctx_t *conn, ly_ext_data_clb cb, void *user_data);
+
+/**
+ * @brief Set libyang search directory for YANG modules needed for parsing extension instance data (such as schema-mount).
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] searchdir Search directory for YANG modules.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_set_ext_data_searchdir(sr_conn_ctx_t *conn, const char *searchdir);
 
 /**
  * @brief Get loaded plugins of a connection.
@@ -688,7 +699,7 @@ int sr_get_item(sr_session_ctx_t *session, const char *path, uint32_t timeout_ms
  * @param[out] value_cnt Number of returned elements in the values array.
  * @return Error code (::SR_ERR_OK on success).
  */
-int sr_get_items(sr_session_ctx_t *session, const char *xpath, uint32_t timeout_ms, const sr_get_oper_options_t opts,
+int sr_get_items(sr_session_ctx_t *session, const char *xpath, uint32_t timeout_ms, const sr_get_options_t opts,
         sr_val_t **values, size_t *value_cnt);
 
 /**
@@ -761,7 +772,25 @@ int sr_get_subtree(sr_session_ctx_t *session, const char *path, uint32_t timeout
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_get_data(sr_session_ctx_t *session, const char *xpath, uint32_t max_depth, uint32_t timeout_ms,
-        const sr_get_oper_options_t opts, sr_data_t **data);
+        const sr_get_options_t opts, sr_data_t **data);
+
+/**
+ * @brief Retrieve a single value matching the provided XPath.
+ * Data are represented as a single _libyang_ node.
+ *
+ * Compared to ::sr_get_data() or ::sr_get_subtree() this function returns only the selected node
+ * without any of its parents so it is more efficient.
+ *
+ * Required READ access, but if the access check fails, the module data are simply ignored without an error.
+ *
+ * @param[in] session Session ([DS](@ref sr_datastore_t)-specific) to use.
+ * @param[in] path [Path](@ref paths) of the data element to be retrieved.
+ * @param[in] timeout_ms Operational callback timeout in milliseconds. If 0, default is used.
+ * @param[out] node SR data with the found node. NULL if none found.
+ * @return Error code (::SR_ERR_OK on success, ::SR_ERR_INVAL_ARG if multiple nodes match the path,
+ * ::SR_ERR_NOT_FOUND if no nodes match the path).
+ */
+int sr_get_node(sr_session_ctx_t *session, const char *path, uint32_t timeout_ms, sr_data_t **node);
 
 /**
  * @brief Release SR data structure, whoch consists of freeing the data tree, releasing the context,

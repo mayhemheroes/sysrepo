@@ -88,6 +88,9 @@ setup(void **state)
     if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
+    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/sm.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
+        return 1;
+    }
 
     st->ly_ctx = sr_acquire_context(st->conn);
 
@@ -117,6 +120,7 @@ teardown(void **state)
         sr_release_context(st->conn);
     }
 
+    ret += sr_remove_module(st->conn, "sm", 0);
     ret += sr_remove_module(st->conn, "ops", 0);
     ret += sr_remove_module(st->conn, "ops-ref", 0);
     ret += sr_remove_module(st->conn, "iana-if-type", 0);
@@ -476,7 +480,8 @@ test_oper_dep(void **state)
     ret = sr_session_get_error(st->sess, &err_info);
     assert_int_equal(ret, SR_ERR_OK);
     assert_int_equal(err_info->err_count, 2);
-    assert_string_equal(err_info->err[0].message, "Invalid instance-identifier \"/ops:cont/list1[k='key']/cont2\" value - required instance not found.");
+    assert_string_equal(err_info->err[0].message, "Invalid instance-identifier \"/ops:cont/list1[k='key']/cont2\" value "
+            "- required instance not found. (Schema location \"/ops:notif3/list2/l15\", data location \"/ops:notif3/list2[k='k']/l15\".)");
     assert_string_equal(err_info->err[1].message, "Notification validation failed.");
 
     /* subscribe to required ops oper data and some non-required */
@@ -492,7 +497,8 @@ test_oper_dep(void **state)
     ret = sr_session_get_error(st->sess, &err_info);
     assert_int_equal(ret, SR_ERR_OK);
     assert_int_equal(err_info->err_count, 2);
-    assert_string_equal(err_info->err[0].message, "Invalid leafref value \"l1-val\" - no existing target instance \"/or:l1\".");
+    assert_string_equal(err_info->err[0].message, "Invalid leafref value \"l1-val\" - no existing target instance \"/or:l1\". "
+            "(Schema location \"/ops:notif3/list2/l14\", data location \"/ops:notif3/list2[k='k']/l14\".)");
     assert_string_equal(err_info->err[1].message, "Notification validation failed.");
 
     /* subscribe to required ops-ref oper data and some non-required */
@@ -522,9 +528,9 @@ test_oper_dep(void **state)
     assert_int_equal(ATOMIC_LOAD_RELAXED(st->cb_called), 4);
     ret = sr_session_get_error(st->sess, &err_info);
     assert_int_equal(ret, SR_ERR_OK);
-    assert_int_equal(err_info->err_count, 2);
-    assert_string_equal(err_info->err[0].message, "Not found node \"l101\" in path.");
-    assert_string_equal(err_info->err[1].message, "Invalid instance-identifier \"/ops-ref:l101\" value - semantic error.");
+    assert_int_equal(err_info->err_count, 1);
+    assert_string_equal(err_info->err[0].message, "Invalid instance-identifier \"/ops-ref:l101\" value - semantic error. "
+            "(Schema location \"/ops:cont/cont3/notif2/l13\".)");
 
     /* correct the instance-identifier */
     input[0].data.string_val = "/ops-ref:l2";
@@ -1543,13 +1549,225 @@ test_wait(void **state)
     sr_unsubscribe(subscr);
 }
 
+/* TEST */
+static LY_ERR
+ly_ext_data_cb(const struct lysc_ext_instance *ext, void *user_data, void **ext_data, ly_bool *ext_data_free)
+{
+    struct state *st = (struct state *)user_data;
+    LY_ERR r;
+    const struct ly_ctx *ly_ctx;
+    struct lyd_node *data = NULL;
+    const char *xml = "<yang-library xmlns=\"urn:ietf:params:xml:ns:yang:ietf-yang-library\" "
+            "    xmlns:ds=\"urn:ietf:params:xml:ns:yang:ietf-datastores\">"
+            "  <module-set>"
+            "    <name>test-set</name>"
+            "    <module>"
+            "      <name>ietf-datastores</name>"
+            "      <revision>2018-02-14</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-datastores</namespace>"
+            "    </module>"
+            "    <module>"
+            "      <name>ietf-yang-library</name>"
+            "      <revision>2019-01-04</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-yang-library</namespace>"
+            "    </module>"
+            "    <module>"
+            "      <name>ietf-yang-schema-mount</name>"
+            "      <revision>2019-01-14</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-yang-schema-mount</namespace>"
+            "    </module>"
+            "    <module>"
+            "      <name>ops</name>"
+            "      <namespace>urn:ops</namespace>"
+            "    </module>"
+            "    <module>"
+            "      <name>ops-ref</name>"
+            "      <namespace>urn:ops-ref</namespace>"
+            "      <feature>feat1</feature>"
+            "    </module>"
+            "    <module>"
+            "      <name>ietf-netconf</name>"
+            "      <revision>2013-09-29</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:netconf:base:1.0</namespace>"
+            "    </module>"
+            "    <module>"
+            "      <name>ietf-origin</name>"
+            "      <revision>2018-02-14</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-origin</namespace>"
+            "    </module>"
+            "    <import-only-module>"
+            "      <name>ietf-yang-types</name>"
+            "      <revision>2013-07-15</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-yang-types</namespace>"
+            "    </import-only-module>"
+            "    <import-only-module>"
+            "      <name>ietf-netconf-acm</name>"
+            "      <revision>2018-02-14</revision>"
+            "      <namespace>urn:ietf:params:xml:ns:yang:ietf-netconf-acm</namespace>"
+            "    </import-only-module>"
+            "  </module-set>"
+            "  <schema>"
+            "    <name>test-schema</name>"
+            "    <module-set>test-set</module-set>"
+            "  </schema>"
+            "  <datastore>"
+            "    <name>ds:running</name>"
+            "    <schema>test-schema</schema>"
+            "  </datastore>"
+            "  <datastore>"
+            "    <name>ds:operational</name>"
+            "    <schema>test-schema</schema>"
+            "  </datastore>"
+            "  <content-id>1</content-id>"
+            "</yang-library>"
+            "<modules-state xmlns=\"urn:ietf:params:xml:ns:yang:ietf-yang-library\">"
+            "  <module-set-id>1</module-set-id>"
+            "</modules-state>"
+            "<schema-mounts xmlns=\"urn:ietf:params:xml:ns:yang:ietf-yang-schema-mount\">"
+            "  <namespace>"
+            "    <prefix>ops</prefix>"
+            "    <uri>urn:ops</uri>"
+            "  </namespace>"
+            "  <mount-point>"
+            "    <module>sm</module>"
+            "    <label>root</label>"
+            "    <shared-schema>"
+            "      <parent-reference>/ops:cont</parent-reference>"
+            "    </shared-schema>"
+            "  </mount-point>"
+            "</schema-mounts>";
+
+    (void)ext;
+
+    ly_ctx = sr_acquire_context(st->conn);
+    r = lyd_parse_data_mem(ly_ctx, xml, LYD_XML, LYD_PARSE_STRICT, LYD_VALIDATE_PRESENT, &data);
+    sr_release_context(st->conn);
+    assert_int_equal(r, LY_SUCCESS);
+
+    *ext_data = data;
+    *ext_data_free = 1;
+    return LY_SUCCESS;
+}
+
+static void
+notif_schema_mount_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_notif_type_t notif_type, const char *xpath,
+        const sr_val_t *values, const size_t values_cnt, struct timespec *timestamp, void *private_data)
+{
+    struct state *st = (struct state *)private_data;
+
+    (void)session;
+    (void)sub_id;
+    (void)values;
+    (void)values_cnt;
+    (void)timestamp;
+
+    if (notif_type == SR_EV_NOTIF_TERMINATED) {
+        /* ignore */
+        return;
+    }
+
+    assert_int_equal(notif_type, SR_EV_NOTIF_REALTIME);
+
+    switch (ATOMIC_LOAD_RELAXED(st->cb_called)) {
+    case 0:
+        assert_string_equal(xpath, "/sm:root/ops:notif4");
+        break;
+    case 1:
+        assert_string_equal(xpath, "/sm:root/ops:cont/cont3/notif2");
+        break;
+    case 2:
+        assert_string_equal(xpath, "/sm:root/ops:notif3");
+        break;
+    default:
+        fail();
+    }
+
+    ATOMIC_INC_RELAXED(st->cb_called);
+}
+
+static int
+notif_oper_cb(sr_session_ctx_t *session, uint32_t sub_id, const char *module_name, const char *xpath,
+        const char *request_xpath, uint32_t request_id, struct lyd_node **parent, void *private_data)
+{
+    struct state *st = (struct state *)private_data;
+
+    (void)session;
+    (void)sub_id;
+    (void)request_xpath;
+    (void)request_id;
+    (void)private_data;
+
+    if (!strcmp(module_name, "sm") && !strcmp(xpath, "/sm:root")) {
+        assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, st->ly_ctx, "/sm:root/ops:cont/cont3", NULL, 0, parent));
+        assert_int_equal(LY_SUCCESS, lyd_new_path(*parent, NULL, "/sm:root/ops-ref:l1", "l1-starting-with", 0, NULL));
+    } else if (!strcmp(module_name, "ops") && !strcmp(xpath, "/ops:cont/l12")) {
+        assert_int_equal(LY_SUCCESS, lyd_new_path(*parent, NULL, "/ops:cont/l12", "value", 0, NULL));
+    } else if (!strcmp(module_name, "ops") && !strcmp(xpath, "/ops:cont/list1")) {
+        assert_int_equal(LY_SUCCESS, lyd_new_path(*parent, NULL, "/ops:cont/list1[k='key']/cont2", NULL, 0, NULL));
+    } else {
+        fail();
+    }
+
+    return SR_ERR_OK;
+}
+
+static void
+test_schema_mount(void **state)
+{
+    struct state *st = (struct state *)*state;
+    sr_subscription_ctx_t *sub = NULL;
+    struct lyd_node *notif;
+    int ret;
+
+    ATOMIC_STORE_RELAXED(st->cb_called, 0);
+
+    /* set schema-mount CB and searchdir */
+    sr_set_ext_data_cb(st->conn, ly_ext_data_cb, st);
+    sr_set_ext_data_searchdir(st->conn, TESTS_SRC_DIR "/files");
+
+    /* subscribe for the notifications */
+    ret = sr_notif_subscribe(st->sess, "sm", NULL, NULL, NULL, notif_schema_mount_cb, st, 0, &sub);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* send simple notif4 */
+    assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, st->ly_ctx, "/sm:root/ops:notif4/l", "val", 0, &notif));
+    ret = sr_notif_send_tree(st->sess, notif, 0, 0);
+    lyd_free_all(notif);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* subscribe for providing mounted and dependency data */
+    ret = sr_oper_get_subscribe(st->sess, "sm", "/sm:root", notif_oper_cb, st, 0, &sub);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_oper_get_subscribe(st->sess, "ops", "/ops:cont/l12", notif_oper_cb, st, 0, &sub);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_oper_get_subscribe(st->sess, "ops", "/ops:cont/list1", notif_oper_cb, st, 0, &sub);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* send nested notif2, wait for the callback */
+    assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, st->ly_ctx, "/sm:root/ops:cont/cont3/notif2/l13", "/ops:cont/l12", 0, &notif));
+    ret = sr_notif_send_tree(st->sess, notif, 0, 1);
+    lyd_free_all(notif);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    /* send notif3, wait for the callback */
+    assert_int_equal(LY_SUCCESS, lyd_new_path(NULL, st->ly_ctx, "/sm:root/ops:notif3/list2[k='val']/l14",
+            "l1-starting-with", 0, &notif));
+    ret = sr_notif_send_tree(st->sess, notif, 0, 1);
+    lyd_free_all(notif);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    assert_int_equal(3, ATOMIC_LOAD_RELAXED(st->cb_called));
+
+    sr_unsubscribe(sub);
+}
+
 /* MAIN */
 int
 main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_input_parameters),
-        /* TODO cmocka_unit_test_teardown(test_oper_dep, clear_ops), */
+        cmocka_unit_test_teardown(test_oper_dep, clear_ops),
         cmocka_unit_test_setup(test_stop, clear_ops_notif),
         cmocka_unit_test_setup_teardown(test_replay_simple, clear_ops_notif, clear_ops),
         cmocka_unit_test_setup(test_replay_interval, create_ops_notif),
@@ -1560,8 +1778,8 @@ main(void)
         cmocka_unit_test(test_params),
         cmocka_unit_test(test_dup_inst),
         cmocka_unit_test(test_wait),
+        cmocka_unit_test(test_schema_mount),
     };
-    (void)test_oper_dep;
 
     setenv("CMOCKA_TEST_ABORT", "1", 1);
     test_log_init();

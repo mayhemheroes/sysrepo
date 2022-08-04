@@ -282,6 +282,7 @@ sr_shmsub_notify_new_wrlock(sr_sub_shm_t *sub_shm, const char *shm_name, sr_sub_
 {
     sr_error_info_t *err_info = NULL;
     struct timespec timeout_ts;
+    uint32_t request_id;
     int ret;
 
     /* WRITE LOCK */
@@ -293,6 +294,9 @@ sr_shmsub_notify_new_wrlock(sr_sub_shm_t *sub_shm, const char *shm_name, sr_sub_
         /* instead of wating, try to recover the event immediately */
         sr_shmsub_recover(sub_shm);
     }
+
+    /* remember current request_id */
+    request_id = sub_shm->request_id;
 
     assert(sub_shm->lock.writer == cid);
     /* FAKE WRITE UNLOCK */
@@ -320,7 +324,10 @@ sr_shmsub_notify_new_wrlock(sr_sub_shm_t *sub_shm, const char *shm_name, sr_sub_
     }
 
     if (ret) {
-        if ((ret == ETIMEDOUT) && (sub_shm->event && (sub_shm->event != lock_event))) {
+        if ((ret == ETIMEDOUT) && (!sub_shm->event || (sub_shm->event == lock_event)) && (request_id == sub_shm->request_id)) {
+            /* even though the timeout has elapsed, the event was handled so continue normally */
+            goto event_handled;
+        } else if ((ret == ETIMEDOUT) && (sub_shm->event && (sub_shm->event != lock_event))) {
             /* timeout */
             sr_errinfo_new(&err_info, SR_ERR_TIME_OUT,
                     "Waiting for subscription of \"%s\" failed, previous event \"%s\" with ID %" PRIu32 " was not processed.",
@@ -335,6 +342,7 @@ sr_shmsub_notify_new_wrlock(sr_sub_shm_t *sub_shm, const char *shm_name, sr_sub_
         return err_info;
     }
 
+event_handled:
     /* we have write lock and the expected event */
     return NULL;
 }
@@ -392,7 +400,10 @@ sr_shmsub_notify_wait_wr(sr_sub_shm_t *sub_shm, sr_sub_event_t expected_ev, int 
     /* we are holding the mutex but no lock flags are set */
 
     if (ret) {
-        if ((ret == ETIMEDOUT) && (sub_shm->event && !SR_IS_NOTIFY_EVENT(sub_shm->event))) {
+        if ((ret == ETIMEDOUT) && SR_IS_NOTIFY_EVENT(sub_shm->event) && (request_id == sub_shm->request_id)) {
+            /* even though the timeout has elapsed, the event was handled so continue normally */
+            goto event_handled;
+        } else if ((ret == ETIMEDOUT) && (sub_shm->event && !SR_IS_NOTIFY_EVENT(sub_shm->event))) {
             /* WRITE LOCK, chances are we will get it if we ignore the event */
             if (!(err_info = sr_sub_rwlock_has_mutex(&sub_shm->lock, timeout_ms, SR_LOCK_WRITE, cid, __func__, NULL, NULL))) {
                 /* event timeout */
@@ -420,6 +431,7 @@ sr_shmsub_notify_wait_wr(sr_sub_shm_t *sub_shm, sr_sub_event_t expected_ev, int 
         return err_info;
     }
 
+event_handled:
     /* FAKE WRITE LOCK */
     sub_shm->lock.writer = cid;
 
@@ -990,7 +1002,7 @@ sr_shmsub_change_notify_update(struct sr_mod_info_s *mod_info, const char *orig_
 
         /* prepare diff to write into SHM */
         if (!diff_lyb && lyd_print_mem(&diff_lyb, mod_info->diff, LYD_LYB, LYD_PRINT_SHRINK | LYD_PRINT_WITHSIBLINGS)) {
-            sr_errinfo_new_ly(&err_info, ly_ctx);
+            sr_errinfo_new_ly(&err_info, ly_ctx, NULL);
             SR_ERRINFO_INT(&err_info);
             goto cleanup;
         }
@@ -1057,7 +1069,7 @@ sr_shmsub_change_notify_update(struct sr_mod_info_s *mod_info, const char *orig_
             /* parse updated edit */
             if (lyd_parse_data_mem(ly_ctx, shm_data_sub.addr, LYD_LYB, LYD_PARSE_STRICT | LYD_PARSE_OPAQ | LYD_PARSE_ONLY,
                     0, &edit)) {
-                sr_errinfo_new_ly(&err_info, ly_ctx);
+                sr_errinfo_new_ly(&err_info, ly_ctx, NULL);
                 sr_errinfo_new(&err_info, SR_ERR_VALIDATION_FAILED, "Failed to parse \"update\" edit.");
                 goto cleanup_wrunlock;
             }
@@ -1070,7 +1082,7 @@ sr_shmsub_change_notify_update(struct sr_mod_info_s *mod_info, const char *orig_
                 *update_edit = edit;
             } else if (edit) {
                 if (lyd_insert_sibling(*update_edit, edit, update_edit)) {
-                    sr_errinfo_new_ly(&err_info, ly_ctx);
+                    sr_errinfo_new_ly(&err_info, ly_ctx, NULL);
                     goto cleanup_wrunlock;
                 }
             }
@@ -1503,7 +1515,7 @@ clear_shm:
         if (!diff_lyb) {
             /* first reverse change diff for abort */
             if (lyd_diff_reverse_all(mod_info->diff, &abort_diff)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 goto cleanup_wrunlock;
             }
 
@@ -1601,7 +1613,7 @@ sr_shmsub_oper_notify(const struct lys_module *ly_mod, const char *xpath, const 
 
     /* print the parent (or nothing) into LYB */
     if (lyd_print_mem(&parent_lyb, parent, LYD_LYB, 0)) {
-        sr_errinfo_new_ly(&err_info, ly_mod->ctx);
+        sr_errinfo_new_ly(&err_info, ly_mod->ctx, NULL);
         goto cleanup;
     }
     parent_lyb_len = lyd_lyb_data_length(parent_lyb);
@@ -1656,7 +1668,7 @@ sr_shmsub_oper_notify(const struct lys_module *ly_mod, const char *xpath, const 
 
     /* parse returned data */
     if (lyd_parse_data_mem(ly_mod->ctx, shm_data_sub.addr, LYD_LYB, LYD_PARSE_ONLY | LYD_PARSE_STRICT, 0, data)) {
-        sr_errinfo_new_ly(&err_info, ly_mod->ctx);
+        sr_errinfo_new_ly(&err_info, ly_mod->ctx, NULL);
         sr_errinfo_new(&err_info, SR_ERR_VALIDATION_FAILED, "Failed to parse returned \"operational\" data.");
         goto cleanup_wrunlock;
     }
@@ -1893,7 +1905,7 @@ sr_shmsub_rpc_notify(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, const char *op_path
 
     /* print the input into LYB */
     if (lyd_print_mem(&input_lyb, input, LYD_LYB, 0)) {
-        sr_errinfo_new_ly(&err_info, LYD_CTX(input));
+        sr_errinfo_new_ly(&err_info, LYD_CTX(input), NULL);
         goto cleanup;
     }
     input_lyb_len = lyd_lyb_data_length(input_lyb);
@@ -1960,7 +1972,7 @@ sr_shmsub_rpc_notify(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, const char *op_path
         ly_in_free(in, 0);
         ly_in_new_memory(shm_data_sub.addr, &in);
         if (lyd_parse_op(LYD_CTX(input), NULL, in, LYD_LYB, LYD_TYPE_REPLY_YANG, output, NULL)) {
-            sr_errinfo_new_ly(&err_info, LYD_CTX(input));
+            sr_errinfo_new_ly(&err_info, LYD_CTX(input), NULL);
             sr_errinfo_new(&err_info, SR_ERR_VALIDATION_FAILED, "Failed to parse returned \"RPC\" data.");
             goto cleanup_wrunlock;
         }
@@ -2128,6 +2140,7 @@ sr_shmsub_notif_notify(sr_conn_ctx_t *conn, const struct lyd_node *notif, struct
     sr_mod_notif_sub_t *notif_subs;
     char *notif_lyb = NULL;
     uint32_t notif_sub_count, notif_lyb_len, request_id, i;
+    sr_cid_t sub_cid;
     sr_multi_sub_shm_t *multi_sub_shm;
     sr_shm_t shm_sub = SR_SHM_INITIALIZER, shm_data_sub = SR_SHM_INITIALIZER;
 
@@ -2141,7 +2154,7 @@ sr_shmsub_notif_notify(sr_conn_ctx_t *conn, const struct lyd_node *notif, struct
     }
 
     /* check that there is a subscriber */
-    if ((err_info = sr_notif_find_subscriber(conn, ly_mod->name, &notif_subs, &notif_sub_count))) {
+    if ((err_info = sr_notif_find_subscriber(conn, ly_mod->name, &notif_subs, &notif_sub_count, &sub_cid))) {
         goto cleanup_ext_unlock;
     }
 
@@ -2172,9 +2185,9 @@ sr_shmsub_notif_notify(sr_conn_ctx_t *conn, const struct lyd_node *notif, struct
         goto cleanup_ext_sub_unlock;
     }
 
-    /* write the notification */
+    /* write the notification, use first subscriber CID - works better than the originator */
     request_id = multi_sub_shm->request_id + 1;
-    if ((err_info = sr_shmsub_multi_notify_write_event(multi_sub_shm, conn->cid, request_id, 0, SR_SUB_EV_NOTIF,
+    if ((err_info = sr_shmsub_multi_notify_write_event(multi_sub_shm, sub_cid, request_id, 0, SR_SUB_EV_NOTIF,
             orig_name, orig_data, notif_sub_count, &shm_data_sub, &notif_ts, notif_lyb, notif_lyb_len, ly_mod->name))) {
         goto cleanup_ext_sub_unlock;
     }
@@ -2514,7 +2527,7 @@ sr_shmsub_change_listen_relock(sr_multi_sub_shm_t *multi_sub_shm, sr_lock_mode_t
             /* update session */
             ev_sess->ev = SR_SUB_EV_ABORT;
             if (lyd_diff_reverse_all(ev_sess->dt[ev_sess->ds].diff, &abort_diff)) {
-                sr_errinfo_new_ly(err_info, ev_sess->conn->ly_ctx);
+                sr_errinfo_new_ly(err_info, ev_sess->conn->ly_ctx, NULL);
                 SR_ERRINFO_INT(err_info);
                 return 1;
             }
@@ -2622,7 +2635,7 @@ sr_shmsub_change_listen_process_module_events(struct modsub_change_s *change_sub
 
     /* parse event diff */
     if (lyd_parse_data_mem(conn->ly_ctx, shm_data_ptr, LYD_LYB, LYD_PARSE_ONLY | LYD_PARSE_STRICT, 0, &diff)) {
-        sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
         SR_ERRINFO_INT(&err_info);
         goto cleanup_rdunlock;
     }
@@ -2901,7 +2914,7 @@ sr_shmsub_oper_listen_process_module_events(struct modsub_oper_s *oper_subs, sr_
 
         /* parse data parent */
         if (lyd_parse_data_mem(conn->ly_ctx, shm_data_ptr, LYD_LYB, LYD_PARSE_ONLY | LYD_PARSE_STRICT, 0, &parent)) {
-            sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
             SR_ERRINFO_INT(&err_info);
             goto error_rdunlock;
         }
@@ -3041,7 +3054,7 @@ sr_shmsub_rpc_listen_call_callback(struct opsub_rpcsub_s *rpc_sub, sr_session_ct
     if (rpc_sub->tree_cb) {
         /* prepare output for tree CB */
         if (lyd_dup_single(input_op, NULL, LYD_DUP_WITH_PARENTS, output_op)) {
-            sr_errinfo_new_ly(&err_info, ev_sess->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, ev_sess->conn->ly_ctx, NULL);
             goto cleanup;
         }
 
@@ -3090,7 +3103,7 @@ sr_shmsub_rpc_listen_call_callback(struct opsub_rpcsub_s *rpc_sub, sr_session_ct
 
         /* prepare output */
         if (lyd_dup_single(input_op, NULL, LYD_DUP_WITH_PARENTS, output_op)) {
-            sr_errinfo_new_ly(&err_info, ev_sess->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, ev_sess->conn->ly_ctx, NULL);
             goto cleanup;
         }
         for (i = 0; i < output_val_count; ++i) {
@@ -3279,7 +3292,7 @@ sr_shmsub_rpc_listen_process_rpc_events(struct opsub_rpc_s *rpc_subs, sr_conn_ct
                 /* parse RPC/action input */
                 ly_in_new_memory(shm_data_ptr, &in);
                 if (lyd_parse_op(conn->ly_ctx, NULL, in, LYD_LYB, LYD_TYPE_RPC_YANG, &input, NULL)) {
-                    sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
                     SR_ERRINFO_INT(&err_info);
                     goto cleanup_rdunlock;
                 }
@@ -3376,7 +3389,7 @@ process_event:
         }
     } else {
         if (lyd_print_mem(&data, output, LYD_LYB, 0)) {
-            sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
             goto cleanup_rdunlock;
         }
         data_len = lyd_lyb_data_length(data);
@@ -3491,7 +3504,7 @@ sr_shmsub_notif_listen_process_module_events(struct modsub_notif_s *notif_subs, 
     /* parse notification */
     ly_in_new_memory(shm_data_ptr, &in);
     if (lyd_parse_op(conn->ly_ctx, NULL, in, LYD_LYB, LYD_TYPE_NOTIF_YANG, &orig_notif, NULL)) {
-        sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
         SR_ERRINFO_INT(&err_info);
         goto cleanup_rdunlock;
     }
@@ -3515,7 +3528,7 @@ sr_shmsub_notif_listen_process_module_events(struct modsub_notif_s *notif_subs, 
                 if (!notif_dup) {
                     /* create notification duplicate */
                     if (lyd_dup_single(orig_notif, NULL, LYD_DUP_RECURSIVE, &notif_dup)) {
-                        sr_errinfo_new_ly(&err_info, conn->ly_ctx);
+                        sr_errinfo_new_ly(&err_info, conn->ly_ctx, NULL);
                         goto cleanup;
                     }
                 }

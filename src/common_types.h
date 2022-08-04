@@ -102,6 +102,7 @@ struct sr_conn_ctx_s {
     sr_conn_options_t opts;         /**< Connection options. */
     ly_ext_data_clb ext_cb;         /**< LY ext data callback for the context. */
     void *ext_cb_data;              /**< LY ext data callback user data. */
+    char *ext_searchdir;            /**< LY ext search dir for YANG modules. */
 
     pthread_mutex_t ptr_lock;       /**< Session-shared lock for accessing pointers to sessions. */
     sr_session_ctx_t **sessions;    /**< Array of sessions for this connection. */
@@ -120,6 +121,8 @@ struct sr_conn_ctx_s {
         const struct srplg_ds_s *plugin;    /**< Datastore plugin. */
     } *ds_handles;                  /**< Datastore implementation handles. */
     uint32_t ds_handle_count;       /**< Datastore implementaion handle count. */
+
+    sr_rwlock_t running_cache_lock; /**< Session-shared lock for accessing running data cache. */
 
     struct sr_ntf_handle_s {
         void *dl_handle;            /**< Handle from dlopen(3) call. */

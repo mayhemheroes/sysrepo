@@ -30,6 +30,8 @@
 #include <unistd.h>
 
 #include <libyang/libyang.h>
+#include <libyang/plugins_exts.h>
+#include <libyang/plugins_types.h>
 
 #include "common.h"
 #include "compat.h"
@@ -44,7 +46,8 @@
 #include "utils/nacm.h"
 
 sr_error_info_t *
-sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int no_dup_check, struct sr_mod_info_s *mod_info)
+sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int dup_xpath, int no_dup_check,
+        struct sr_mod_info_s *mod_info)
 {
     sr_error_info_t *err_info = NULL;
     struct sr_mod_info_mod_s *mod = NULL;
@@ -86,14 +89,23 @@ sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int no_dup_ch
             }
         }
 
+        if (dup_xpath && !(mod->state & MOD_INFO_XPATH_DYN)) {
+            /* duplicate all the current xpaths, they cannot be mixed */
+            for (i = 0; i < mod->xpath_count; ++i) {
+                mod->xpaths[i] = strdup(mod->xpaths[i]);
+                SR_CHECK_MEM_RET(!mod->xpaths[i], err_info);
+            }
+            mod->state |= MOD_INFO_XPATH_DYN;
+        }
+
         /* add xpath for mod */
         mem = realloc(mod->xpaths, (mod->xpath_count + 1) * sizeof *mod->xpaths);
         SR_CHECK_MEM_RET(!mem, err_info);
         mod->xpaths = mem;
 
-        mod->xpaths[mod->xpath_count] = xpath;
+        mod->xpaths[mod->xpath_count] = dup_xpath ? strdup(xpath) : xpath;
         ++mod->xpath_count;
-        mod->state |= MOD_INFO_NEW;
+        mod->state |= MOD_INFO_NEW | (dup_xpath ? MOD_INFO_XPATH_DYN : 0);
     }
 
     return NULL;
@@ -120,7 +132,7 @@ sr_modinfo_add_all_modules_with_data(const struct ly_ctx *ly_ctx, int state_data
             continue;
         }
 
-        if ((err_info = sr_modinfo_add(ly_mod, NULL, 1, mod_info))) {
+        if ((err_info = sr_modinfo_add(ly_mod, NULL, 0, 1, mod_info))) {
             return err_info;
         }
     }
@@ -149,7 +161,7 @@ sr_modinfo_collect_edit(const struct lyd_node *edit, struct sr_mod_info_s *mod_i
         ly_mod = lyd_owner_module(root);
 
         /* remember the module */
-        if ((err_info = sr_modinfo_add(ly_mod, NULL, 0, mod_info))) {
+        if ((err_info = sr_modinfo_add(ly_mod, NULL, 0, 0, mod_info))) {
             return err_info;
         }
     }
@@ -159,7 +171,7 @@ sr_modinfo_collect_edit(const struct lyd_node *edit, struct sr_mod_info_s *mod_i
 
 sr_error_info_t *
 sr_modinfo_collect_xpath(const struct ly_ctx *ly_ctx, const char *xpath, sr_datastore_t ds, int store_xpath,
-        struct sr_mod_info_s *mod_info)
+        int dup_xpath, struct sr_mod_info_s *mod_info)
 {
     sr_error_info_t *err_info = NULL;
     const struct lys_module *prev_ly_mod, *ly_mod;
@@ -169,7 +181,7 @@ sr_modinfo_collect_xpath(const struct ly_ctx *ly_ctx, const char *xpath, sr_data
 
     /* learn what nodes are needed for evaluation */
     if (lys_find_xpath_atoms(ly_ctx, NULL, xpath, 0, &set)) {
-        sr_errinfo_new_ly(&err_info, (struct ly_ctx *)ly_ctx);
+        sr_errinfo_new_ly(&err_info, (struct ly_ctx *)ly_ctx, NULL);
         goto cleanup;
     }
 
@@ -195,7 +207,7 @@ sr_modinfo_collect_xpath(const struct ly_ctx *ly_ctx, const char *xpath, sr_data
             continue;
         }
 
-        if ((err_info = sr_modinfo_add(ly_mod, store_xpath ? xpath : NULL, 0, mod_info))) {
+        if ((err_info = sr_modinfo_add(ly_mod, store_xpath ? xpath : NULL, dup_xpath, 0, mod_info))) {
             goto cleanup;
         }
     }
@@ -225,8 +237,8 @@ sr_modinfo_collect_deps(struct sr_mod_info_s *mod_info)
             /* this module data will be validated */
             assert(mod->state & MOD_INFO_DATA);
             if ((err_info = sr_shmmod_collect_deps(SR_CONN_MOD_SHM(mod_info->conn),
-                    (sr_dep_t *)(mod_info->conn->mod_shm.addr + mod->shm_mod->deps),
-                    mod->shm_mod->dep_count, mod_info->conn->ly_ctx, mod_info->data, mod_info))) {
+                    (sr_dep_t *)(mod_info->conn->mod_shm.addr + mod->shm_mod->deps), mod->shm_mod->dep_count,
+                    mod_info->data, mod_info))) {
                 return err_info;
             }
             break;
@@ -239,6 +251,113 @@ sr_modinfo_collect_deps(struct sr_mod_info_s *mod_info)
     }
 
     return NULL;
+}
+
+sr_error_info_t *
+sr_modinfo_collect_ext_deps(const struct lysc_node *mp_node, struct sr_mod_info_s *mod_info)
+{
+    sr_error_info_t *err_info = NULL;
+    char *path = NULL, *str_val = NULL, *mod_name;
+    LY_ARRAY_COUNT_TYPE u;
+    struct lysc_ext_instance *sm_ext = NULL;
+    struct ly_set *set = NULL;
+    struct lyd_node *ext_data = NULL;
+    struct lyd_node_term *term;
+    struct lyd_value_xpath10 *xp_val;
+    const struct lys_module *mod;
+    ly_bool ext_data_free = 0;
+    struct ly_err_item *err;
+    uint32_t i;
+
+    /* check there is a mount-point defined */
+    LY_ARRAY_FOR(mp_node->exts, u) {
+        if (!strcmp(mp_node->exts[u].def->module->name, "ietf-yang-schema-mount") &&
+                !strcmp(mp_node->exts[u].def->name, "mount-point")) {
+            sm_ext = &mp_node->exts[u];
+            break;
+        }
+    }
+    if (!sm_ext) {
+        goto cleanup;
+    }
+
+    /* check there is a callback defined */
+    if (!mod_info->conn->ext_cb) {
+        sr_errinfo_new(&err_info, SR_ERR_OPERATION_FAILED, "Missing extension callback for parsing mounted data.");
+        goto cleanup;
+    }
+
+    /*
+     * 1) collect all the mounted data, which can always be referenced
+     */
+
+    /* get path to the mount-point */
+    path = lysc_path(mp_node, LYSC_PATH_DATA, NULL, 0);
+
+    /* collect all the mounted data */
+    if ((err_info = sr_modinfo_collect_xpath(mod_info->conn->ly_ctx, path, mod_info->ds, 1, 1, mod_info))) {
+        goto cleanup;
+    }
+
+    /*
+     * 2) collect all data in parent-references of the mount-point
+     */
+
+    /* get ext data */
+    if (mod_info->conn->ext_cb(sm_ext, mod_info->conn->ext_cb_data, (void **)&ext_data, &ext_data_free)) {
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
+        goto cleanup;
+    }
+
+    /* get all parent references of this mount point */
+    free(path);
+    if (asprintf(&path, "/ietf-yang-schema-mount:schema-mounts/mount-point[module='%s'][label='%s']"
+            "/shared-schema/parent-reference", sm_ext->module->name, sm_ext->argument) == -1) {
+        SR_ERRINFO_MEM(&err_info);
+        goto cleanup;
+    }
+    if (lyd_find_xpath(ext_data, path, &set)) {
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
+        goto cleanup;
+    }
+
+    for (i = 0; i < set->count; ++i) {
+        term = (struct lyd_node_term *)set->dnodes[i];
+        LYD_VALUE_GET(&term->value, xp_val);
+
+        /* transform reference into JSON */
+        free(str_val);
+        str_val = NULL;
+        if (lyplg_type_print_xpath10_value(xp_val, LY_VALUE_JSON, NULL, &str_val, &err)) {
+            if (err) {
+                sr_errinfo_new(&err_info, SR_ERR_LY, "%s", err->msg);
+                ly_err_free(err);
+            } else {
+                sr_errinfo_new(&err_info, SR_ERR_LY, "Failed to print parent reference value.");
+            }
+            goto cleanup;
+        }
+
+        /* get the module */
+        mod_name = sr_get_first_ns(str_val);
+        mod = ly_ctx_get_module_implemented(mod_info->conn->ly_ctx, mod_name);
+        free(mod_name);
+        SR_CHECK_INT_GOTO(!mod, err_info, cleanup);
+
+        /* collect the XPath and the module */
+        if ((err_info = sr_modinfo_add(mod, str_val, 1, 0, mod_info))) {
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    if (ext_data_free) {
+        lyd_free_siblings(ext_data);
+    }
+    free(path);
+    free(str_val);
+    ly_set_free(set, NULL);
+    return err_info;
 }
 
 sr_error_info_t *
@@ -356,7 +475,14 @@ sr_modinfo_edit_apply(struct sr_mod_info_s *mod_info, const struct lyd_node *edi
 
     LY_LIST_FOR(edit, node) {
         ly_mod = lyd_owner_module(node);
-        if (ly_mod && !strcmp(ly_mod->name, "sysrepo")) {
+        if (!ly_mod && !node->schema) {
+            lyd_parse_opaq_error(node);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
+            return err_info;
+        }
+
+        assert(ly_mod);
+        if (!strcmp(ly_mod->name, "sysrepo")) {
             sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Data of internal module \"sysrepo\" cannot be modified.");
             return err_info;
         }
@@ -377,7 +503,7 @@ sr_modinfo_edit_apply(struct sr_mod_info_s *mod_info, const struct lyd_node *edi
                 if (cb_data.err_info) {
                     err_info = cb_data.err_info;
                 } else {
-                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 }
                 goto cleanup;
             }
@@ -417,7 +543,7 @@ sr_modinfo_diff_merge(struct sr_mod_info_s *mod_info, const struct lyd_node *new
         if (mod->state & MOD_INFO_REQ) {
             /* merge relevant diff part */
             if (lyd_diff_merge_module(&mod_info->diff, new_diff, mod->ly_mod, NULL, NULL, 0)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 return err_info;
             }
         }
@@ -444,7 +570,7 @@ sr_modinfo_replace(struct sr_mod_info_s *mod_info, struct lyd_node **src_data)
 
             /* get diff on only this module's data */
             if (lyd_diff_siblings(dst_mod_data, src_mod_data, LYD_DIFF_DEFAULTS, &diff)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 lyd_free_all(dst_mod_data);
                 lyd_free_all(src_mod_data);
                 return err_info;
@@ -688,7 +814,7 @@ sr_xpath_oper_data_get(const struct lys_module *ly_mod, const char *xpath, const
     if (parent) {
         /* duplicate parent so that it is a stand-alone subtree */
         if (lyd_dup_single(parent, NULL, LYD_DUP_WITH_PARENTS, &last_parent)) {
-            sr_errinfo_new_ly(&err_info, ly_mod->ctx);
+            sr_errinfo_new_ly(&err_info, ly_mod->ctx, NULL);
             return err_info;
         }
 
@@ -733,7 +859,7 @@ sr_xpath_oper_data_get(const struct lys_module *ly_mod, const char *xpath, const
     if (*oper_data) {
         /* add any missing NP containers, redundant to add top-level containers */
         if (lyd_new_implicit_tree(*oper_data, LYD_IMPLICIT_NO_DEFAULTS, NULL)) {
-            sr_errinfo_new_ly(&err_info, ly_mod->ctx);
+            sr_errinfo_new_ly(&err_info, ly_mod->ctx, NULL);
             goto cleanup;
         }
     }
@@ -753,13 +879,13 @@ cleanup:
  * @param[in] orig_data Event originator data.
  * @param[in] conn Connection to use.
  * @param[in] timeout_ms Operational callback timeout in milliseconds.
- * @param[in] opts Get oper data options.
+ * @param[in] get_oper_opts Get oper data options.
  * @param[in,out] data Operational data tree.
  * @return err_info, NULL on success.
  */
 static sr_error_info_t *
 sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name, const void *orig_data, sr_conn_ctx_t *conn,
-        uint32_t timeout_ms, sr_get_oper_options_t opts, struct lyd_node **data)
+        uint32_t timeout_ms, sr_get_oper_flag_t get_oper_opts, struct lyd_node **data)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_oper_sub_t *shm_sub;
@@ -770,7 +896,7 @@ sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name,
     struct ly_set *set = NULL;
     struct lyd_node *edit = NULL, *oper_data;
 
-    if (!(opts & SR_OPER_NO_STORED)) {
+    if (!(get_oper_opts & SR_OPER_NO_STORED)) {
         /* get stored operational edit */
         if ((err_info = sr_module_file_oper_data_load(mod, &edit))) {
             return err_info;
@@ -786,12 +912,12 @@ sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name,
 
         /* add any missing NP containers in the data */
         if (lyd_new_implicit_module(data, mod->ly_mod, LYD_IMPLICIT_NO_DEFAULTS, NULL)) {
-            sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx);
+            sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx, NULL);
             return err_info;
         }
     }
 
-    if (opts & SR_OPER_NO_SUBS) {
+    if (get_oper_opts & SR_OPER_NO_SUBS) {
         /* do not get data from subscribers */
         return NULL;
     }
@@ -830,8 +956,8 @@ sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name,
         }
 
         /* useless to retrieve configuration data, state data */
-        if (((shm_sub->sub_type == SR_OPER_SUB_CONFIG) && (opts & SR_OPER_NO_CONFIG)) ||
-                ((shm_sub->sub_type == SR_OPER_SUB_STATE) && (opts & SR_OPER_NO_STATE))) {
+        if (((shm_sub->sub_type == SR_OPER_SUB_CONFIG) && (get_oper_opts & SR_OPER_NO_CONFIG)) ||
+                ((shm_sub->sub_type == SR_OPER_SUB_STATE) && (get_oper_opts & SR_OPER_NO_STATE))) {
             ++i;
             continue;
         }
@@ -875,7 +1001,7 @@ sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name,
             }
 
             if (lyd_find_xpath(*data, parent_xpath, &set)) {
-                sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx);
+                sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx, NULL);
                 goto cleanup_opersub_ext_unlock;
             }
 
@@ -895,7 +1021,7 @@ sr_module_oper_data_update(struct sr_mod_info_mod_s *mod, const char *orig_name,
                 /* merge into one data tree */
                 if (lyd_merge_siblings(data, oper_data, LYD_MERGE_DESTRUCT)) {
                     lyd_free_all(oper_data);
-                    sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx);
+                    sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx, NULL);
                     goto cleanup_opersub_ext_unlock;
                 }
             }
@@ -915,7 +1041,7 @@ next_iter:
 
             if (lyd_merge_siblings(data, oper_data, LYD_MERGE_DESTRUCT)) {
                 lyd_free_all(oper_data);
-                sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx);
+                sr_errinfo_new_ly(&err_info, mod->ly_mod->ctx, NULL);
                 goto cleanup_opersub_ext_unlock;
             }
         }
@@ -948,14 +1074,14 @@ cleanup_opersub_unlock:
  * @param[in] conn Connection to use.
  * @param[in,out] data Configuration data, are unlinked from if @p dup is 0.
  * @param[in] mod Mod info module to process.
- * @param[in] opts Get oper data options.
+ * @param[in] get_oper_opts Get oper data options.
  * @param[in] dup Whether to duplicate data or only unlink.
  * @param[out] enabled_mod_data Enabled operational data of the module.
  * @return err_info, NULL on success.
  */
 static sr_error_info_t *
 sr_module_oper_data_get_enabled(sr_conn_ctx_t *conn, struct lyd_node **data, struct sr_mod_info_mod_s *mod,
-        sr_get_oper_options_t opts, int dup, struct lyd_node **enabled_mod_data)
+        sr_get_oper_flag_t get_oper_opts, int dup, struct lyd_node **enabled_mod_data)
 {
     sr_error_info_t *err_info = NULL;
     sr_mod_change_sub_t *shm_changesubs;
@@ -1029,7 +1155,7 @@ sr_module_oper_data_get_enabled(sr_conn_ctx_t *conn, struct lyd_node **data, str
     /* CHANGE SUB READ UNLOCK */
     sr_rwunlock(&mod->shm_mod->change_sub[SR_DS_RUNNING].lock, SR_SHMEXT_SUB_LOCK_TIMEOUT, SR_LOCK_READ, conn->cid, __func__);
 
-    if (opts & SR_OPER_WITH_ORIGIN) {
+    if (get_oper_opts & SR_OPER_WITH_ORIGIN) {
         LY_LIST_FOR(*enabled_mod_data, root) {
             /* add origin of all top-level nodes */
             origin = (root->schema->flags & LYS_CONFIG_W) ? SR_CONFIG_ORIGIN : SR_OPER_ORIGIN;
@@ -1068,15 +1194,15 @@ error_sub_unlock:
  *
  * @param[in,out] data Data to trim.
  * @param[in] sibling First sibling of the current data to trim.
- * @param[in] opts Get oper data options.
+ * @param[in] get_oper_opts Get oper data options.
  */
 static void
-sr_oper_data_trim_r(struct lyd_node **data, struct lyd_node *sibling, sr_get_oper_options_t opts)
+sr_oper_data_trim_r(struct lyd_node **data, struct lyd_node *sibling, sr_get_oper_flag_t get_oper_opts)
 {
     struct lyd_node *next, *elem;
     struct lyd_meta *meta;
 
-    if (!(opts & (SR_OPER_NO_STATE | SR_OPER_NO_CONFIG)) && (opts & SR_OPER_WITH_ORIGIN)) {
+    if (!(get_oper_opts & (SR_OPER_NO_STATE | SR_OPER_NO_CONFIG)) && (get_oper_opts & SR_OPER_WITH_ORIGIN)) {
         /* nothing to trim */
         return;
     }
@@ -1085,7 +1211,7 @@ sr_oper_data_trim_r(struct lyd_node **data, struct lyd_node *sibling, sr_get_ope
         assert((elem->schema->nodetype != LYS_LEAF) || !(elem->schema->flags & LYS_KEY));
         if (elem->schema->flags & LYS_CONFIG_R) {
             /* state subtree */
-            if (opts & SR_OPER_NO_STATE) {
+            if (get_oper_opts & SR_OPER_NO_STATE) {
                 /* free it whole */
                 if (*data == elem) {
                     *data = (*data)->next;
@@ -1094,16 +1220,16 @@ sr_oper_data_trim_r(struct lyd_node **data, struct lyd_node *sibling, sr_get_ope
                 continue;
             }
 
-            if (opts & SR_OPER_WITH_ORIGIN) {
+            if (get_oper_opts & SR_OPER_WITH_ORIGIN) {
                 /* no need to go into state children */
                 continue;
             }
         }
 
         /* trim all our children */
-        sr_oper_data_trim_r(data, lyd_child_no_keys(elem), opts);
+        sr_oper_data_trim_r(data, lyd_child_no_keys(elem), get_oper_opts);
 
-        if ((elem->schema->flags & LYS_CONFIG_W) && (opts & SR_OPER_NO_CONFIG) && !lyd_child_no_keys(elem)) {
+        if ((elem->schema->flags & LYS_CONFIG_W) && (get_oper_opts & SR_OPER_NO_CONFIG) && !lyd_child_no_keys(elem)) {
             /* config-only subtree (config node with no children) */
             if (*data == elem) {
                 *data = (*data)->next;
@@ -1112,7 +1238,7 @@ sr_oper_data_trim_r(struct lyd_node **data, struct lyd_node *sibling, sr_get_ope
             continue;
         }
 
-        if (!(opts & SR_OPER_WITH_ORIGIN)) {
+        if (!(get_oper_opts & SR_OPER_WITH_ORIGIN)) {
             /* trim origin */
             LY_LIST_FOR(elem->meta, meta) {
                 if (!strcmp(meta->name, "origin") && !strcmp(meta->annotation->module->name, "ietf-origin")) {
@@ -1153,7 +1279,7 @@ sr_modinfo_module_data_load_yanglib(struct sr_mod_info_s *mod_info, struct sr_mo
                 lyd_new_path(mod_data, NULL, "datastore[name='ietf-datastores:candidate']/schema", "complete", 0, 0) ||
                 lyd_new_path(mod_data, NULL, "datastore[name='ietf-datastores:startup']/schema", "complete", 0, 0) ||
                 lyd_new_path(mod_data, NULL, "datastore[name='ietf-datastores:operational']/schema", "complete", 0, 0)) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             return err_info;
         }
     } else if (!strcmp(mod->ly_mod->revision, "2016-06-21")) {
@@ -1168,7 +1294,7 @@ sr_modinfo_module_data_load_yanglib(struct sr_mod_info_s *mod_info, struct sr_mo
 
     /* connect to the rest of data */
     if (lyd_merge_siblings(&mod_info->data, mod_data, LYD_MERGE_DESTRUCT)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         return err_info;
     }
 
@@ -1230,7 +1356,7 @@ sr_modinfo_module_srmon_locks_ds(sr_rwlock_t *rwlock, uint32_t skip_read_cid, co
 
         snprintf(path, PATH_LEN, path_format, cid);
         if (lyd_new_path(ctx_node, NULL, path, "read", 0, NULL)) {
-            sr_errinfo_new_ly(&err_info, ly_ctx);
+            sr_errinfo_new_ly(&err_info, ly_ctx, NULL);
             break;
         }
     }
@@ -1697,7 +1823,7 @@ sr_modinfo_module_data_load_srmon(struct sr_mod_info_s *mod_info, struct sr_mod_
 
     /* connect to the rest of data */
     if (lyd_merge_siblings(&mod_info->data, mod_data, LYD_MERGE_DESTRUCT)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
     mod_data = NULL;
@@ -1716,13 +1842,13 @@ cleanup:
  * @param[in] orig_name Event originator name.
  * @param[in] orig_data Event originator data.
  * @param[in] timeout_ms Operational callback timeout in milliseconds.
- * @param[in] opts Get oper data options.
+ * @param[in] get_oper_opts Get oper data options.
  * @return err_info, NULL on success.
  */
 static sr_error_info_t *
 sr_modinfo_module_data_load(struct sr_mod_info_s *mod_info, struct sr_mod_info_mod_s *mod,
         const struct lyd_node *cached_data, const char *orig_name, const void *orig_data, uint32_t timeout_ms,
-        sr_get_oper_options_t opts)
+        sr_get_oper_flag_t get_oper_opts)
 {
     sr_error_info_t *err_info = NULL;
     sr_conn_ctx_t *conn = mod_info->conn;
@@ -1735,7 +1861,7 @@ sr_modinfo_module_data_load(struct sr_mod_info_s *mod_info, struct sr_mod_info_m
         /* there are cached data */
         if (mod_info->ds == SR_DS_OPERATIONAL) {
             /* copy only enabled module data */
-            err_info = sr_module_oper_data_get_enabled(conn, (struct lyd_node **)&cached_data, mod, opts, 1, &mod_data);
+            err_info = sr_module_oper_data_get_enabled(conn, (struct lyd_node **)&cached_data, mod, get_oper_opts, 1, &mod_data);
         } else {
             /* copy all module data */
             err_info = sr_lyd_get_module_data((struct lyd_node **)&cached_data, mod->ly_mod, 0, 1, &mod_data);
@@ -1758,7 +1884,7 @@ sr_modinfo_module_data_load(struct sr_mod_info_s *mod_info, struct sr_mod_info_m
 
         if (mod_info->ds == SR_DS_OPERATIONAL) {
             /* keep only enabled module data */
-            if ((err_info = sr_module_oper_data_get_enabled(conn, &mod_info->data, mod, opts, 0, &mod_data))) {
+            if ((err_info = sr_module_oper_data_get_enabled(conn, &mod_info->data, mod, get_oper_opts, 0, &mod_data))) {
                 return err_info;
             }
             lyd_free_siblings(sr_module_data_unlink(&mod_info->data, mod->ly_mod));
@@ -1782,13 +1908,13 @@ sr_modinfo_module_data_load(struct sr_mod_info_s *mod_info, struct sr_mod_info_m
         }
 
         /* append any operational data provided by clients */
-        if ((err_info = sr_module_oper_data_update(mod, orig_name, orig_data, conn, timeout_ms, opts,
+        if ((err_info = sr_module_oper_data_update(mod, orig_name, orig_data, conn, timeout_ms, get_oper_opts,
                 &mod_info->data))) {
             return err_info;
         }
 
         /* trim any data according to options (they could not be trimmed before oper subscriptions) */
-        sr_oper_data_trim_r(&mod_info->data, mod_info->data, opts);
+        sr_oper_data_trim_r(&mod_info->data, mod_info->data, get_oper_opts);
     }
 
     return NULL;
@@ -1942,18 +2068,22 @@ sr_modinfo_qsort_cmp(const void *ptr1, const void *ptr2)
 
 sr_error_info_t *
 sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache, const char *orig_name, const void *orig_data,
-        uint32_t timeout_ms, sr_get_oper_options_t opts)
+        uint32_t timeout_ms, sr_get_oper_flag_t get_oper_opts)
 {
     sr_error_info_t *err_info = NULL;
+    sr_conn_ctx_t *conn;
     const struct srplg_ds_s *run_ds_plg;
     const struct lyd_node *cached_data = NULL;
+    sr_lock_mode_t cache_lock_mode = SR_LOCK_NONE;
     const struct lys_module **ly_mods = NULL;
     struct sr_mod_info_mod_s *mod;
     uint32_t i;
     int rc;
 
+    conn = mod_info->conn;
+
     /* we can use cache only if we are working with the running datastore (as the main datastore) */
-    if (!mod_info->data_cached && cache && mod_info->mod_count && (mod_info->conn->opts & SR_CONN_CACHE_RUNNING) &&
+    if (!mod_info->data_cached && cache && mod_info->mod_count && (conn->opts & SR_CONN_CACHE_RUNNING) &&
             ((mod_info->ds == SR_DS_RUNNING) || (mod_info->ds2 == SR_DS_RUNNING))) {
         /* prepare module array */
         ly_mods = malloc(mod_info->mod_count * sizeof *ly_mods);
@@ -1978,14 +2108,49 @@ sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache, const char *orig
         }
 
         if (run_ds_plg) {
-            /* load the data from the cache */
-            if ((rc = run_ds_plg->running_load_cached_cb(mod_info->conn->cid, ly_mods, mod_info->mod_count, &cached_data))) {
-                SR_ERRINFO_DSPLUGIN(&err_info, rc, "running_load_cached", run_ds_plg->name, "<unknown>");
+            /* CACHE READ LOCK */
+            if ((err_info = sr_rwlock(&conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_READ,
+                    conn->cid, __func__, NULL, NULL))) {
                 goto cleanup;
+            }
+            cache_lock_mode = SR_LOCK_READ;
+
+            /* load the data from the cache */
+            while ((rc = run_ds_plg->running_load_cached_cb(conn->cid, ly_mods, mod_info->mod_count, &cached_data))) {
+                if (rc == SR_ERR_OPERATION_FAILED) {
+                    /* CACHE READ UNLOCK */
+                    sr_rwunlock(&conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_READ, conn->cid, __func__);
+                    cache_lock_mode = SR_LOCK_NONE;
+
+                    /* CACHE WRITE LOCK */
+                    if ((err_info = sr_rwlock(&conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_WRITE,
+                            conn->cid, __func__, NULL, NULL))) {
+                        goto cleanup;
+                    }
+                    cache_lock_mode = SR_LOCK_WRITE;
+
+                    /* update the cache first */
+                    if ((rc = run_ds_plg->running_update_cached_cb(conn->cid, ly_mods, mod_info->mod_count))) {
+                        SR_ERRINFO_DSPLUGIN(&err_info, rc, "running_update_cached", run_ds_plg->name, "<unknown>");
+                        goto cleanup;
+                    }
+
+                    /* CACHE READ RELOCK */
+                    if ((err_info = sr_rwrelock(&conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_READ,
+                            conn->cid, __func__, NULL, NULL))) {
+                        goto cleanup;
+                    }
+                    cache_lock_mode = SR_LOCK_READ;
+                } else {
+                    SR_ERRINFO_DSPLUGIN(&err_info, rc, "running_load_cached", run_ds_plg->name, "<unknown>");
+                    goto cleanup;
+                }
             }
 
             if (mod_info->ds == SR_DS_RUNNING) {
-                /* directly use the cached data */
+                /* directly use the cached data, keep the lock */
+                cache_lock_mode = SR_LOCK_NONE;
+
                 mod_info->data_cached = 1;
                 mod_info->data = (struct lyd_node *)cached_data;
                 for (i = 0; i < mod_info->mod_count; ++i) {
@@ -2013,7 +2178,8 @@ sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache, const char *orig
                 goto cleanup;
             }
         } else {
-            if ((err_info = sr_modinfo_module_data_load(mod_info, mod, cached_data, orig_name, orig_data, timeout_ms, opts))) {
+            if ((err_info = sr_modinfo_module_data_load(mod_info, mod, cached_data, orig_name, orig_data, timeout_ms,
+                    get_oper_opts))) {
                 /* if cached, we keep both cache lock and flag, so it is fine */
                 goto cleanup;
             }
@@ -2025,6 +2191,10 @@ sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache, const char *orig
     }
 
 cleanup:
+    if (cache_lock_mode) {
+        /* CACHE UNLOCK */
+        sr_rwunlock(&conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, cache_lock_mode, conn->cid, __func__);
+    }
     free(ly_mods);
     return err_info;
 }
@@ -2032,7 +2202,7 @@ cleanup:
 sr_error_info_t *
 sr_modinfo_consolidate(struct sr_mod_info_s *mod_info, int mod_deps, sr_lock_mode_t mod_lock, int mi_opts, uint32_t sid,
         const char *orig_name, const void *orig_data, uint32_t timeout_ms, uint32_t ds_lock_timeout_ms,
-        sr_get_oper_options_t get_opts)
+        sr_get_oper_flag_t get_oper_opts)
 {
     sr_error_info_t *err_info = NULL;
     int mod_type, new = 0;
@@ -2108,7 +2278,7 @@ sr_modinfo_consolidate(struct sr_mod_info_s *mod_info, int mod_deps, sr_lock_mod
     if (!(mi_opts & SR_MI_DATA_NO)) {
         /* load all modules data */
         if ((err_info = sr_modinfo_data_load(mod_info, mi_opts & SR_MI_DATA_CACHE, orig_name, orig_data, timeout_ms,
-                get_opts))) {
+                get_oper_opts))) {
             return err_info;
         }
     }
@@ -2139,7 +2309,7 @@ sr_modinfo_validate(struct sr_mod_info_s *mod_info, int mod_state, int finish_di
         if (mod->state & mod_state) {
             /* validate this module */
             if (lyd_validate_module(&mod_info->data, mod->ly_mod, val_opts, finish_diff ? &diff : NULL)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 SR_ERRINFO_VALID(&err_info);
                 goto cleanup;
             }
@@ -2150,7 +2320,7 @@ sr_modinfo_validate(struct sr_mod_info_s *mod_info, int mod_state, int finish_di
 
                 /* merge the changes made by the validation into our diff */
                 if (lyd_diff_merge_all(&mod_info->diff, diff, 0)) {
-                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                     goto cleanup;
                 }
 
@@ -2182,7 +2352,7 @@ sr_modinfo_add_defaults(struct sr_mod_info_s *mod_info, int finish_diff)
         case MOD_INFO_REQ:
             /* add default values for this module */
             if (lyd_new_implicit_module(&mod_info->data, mod->ly_mod, LYD_IMPLICIT_NO_STATE, finish_diff ? &diff : NULL)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 SR_ERRINFO_VALID(&err_info);
                 goto cleanup;
             }
@@ -2194,7 +2364,7 @@ sr_modinfo_add_defaults(struct sr_mod_info_s *mod_info, int finish_diff)
 
                 /* merge the changes made by the validation into our diff */
                 if (lyd_diff_merge_all(&mod_info->diff, diff, 0)) {
-                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                     goto cleanup;
                 }
 
@@ -2220,17 +2390,22 @@ sr_error_info_t *
 sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct lyd_node *op, int output)
 {
     sr_error_info_t *err_info = NULL;
-    struct lyd_node *top_op;
+    struct lyd_node *top_op, *op_ext_parent = NULL, *node;
     struct ly_set *set = NULL;
     struct sr_mod_info_mod_s *mod;
     uint32_t i;
-    char *parent_xpath = NULL;
+    char *parent_xpath = NULL, *ext_children_path = NULL;
     enum lyd_type op_type;
 
     assert(op->schema->nodetype & (LYS_RPC | LYS_ACTION | LYS_NOTIF));
 
     /* find top-level node */
-    for (top_op = op; top_op->parent; top_op = lyd_parent(top_op)) {}
+    for (top_op = op; top_op->parent; top_op = lyd_parent(top_op)) {
+        if (top_op->flags & LYD_EXT) {
+            /* the operation is from extension data */
+            op_ext_parent = lyd_parent(top_op);
+        }
+    }
 
     for (i = 0; i < mod_info->mod_count; ++i) {
         mod = &mod_info->mods[i];
@@ -2238,17 +2413,18 @@ sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct lyd_node *op, int 
         case MOD_INFO_REQ:
             /* this is the module of the nested operation and we need to check that operation's parent data node exists */
             assert((mod->ly_mod == lyd_owner_module(top_op)) && op->schema->parent && op->parent);
+            free(parent_xpath);
             parent_xpath = lyd_path(lyd_parent(op), LYD_PATH_STD, NULL, 0);
             SR_CHECK_MEM_GOTO(!parent_xpath, err_info, cleanup);
 
             if (mod_info->data) {
                 if (lyd_find_xpath(mod_info->data, parent_xpath, &set)) {
-                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                     goto cleanup;
                 }
             } else {
                 if (ly_set_new(&set)) {
-                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                    sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                     goto cleanup;
                 }
             }
@@ -2269,11 +2445,40 @@ sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct lyd_node *op, int 
         }
     }
 
+    /* free set */
+    ly_set_free(set, NULL);
+    set = NULL;
+
+    if (op_ext_parent) {
+        /* generate path to all the parent children, which represent top-level nodes in the mount-jail */
+        ext_children_path = lyd_path(op_ext_parent, LYD_PATH_STD, NULL, 0);
+        SR_CHECK_MEM_GOTO(!ext_children_path, err_info, cleanup);
+        ext_children_path = sr_realloc(ext_children_path, strlen(ext_children_path) + 3);
+        SR_CHECK_MEM_GOTO(!ext_children_path, err_info, cleanup);
+        strcat(ext_children_path, "/*");
+
+        /* get all the nodes */
+        if (lyd_find_xpath(mod_info->data, ext_children_path, &set)) {
+            sr_errinfo_new_ly(&err_info, LYD_CTX(mod_info->data), NULL);
+            goto cleanup;
+        }
+
+        /* reconnect them into the dependency tree used for validation */
+        for (i = 0; i < set->count; ++i) {
+            node = set->dnodes[i];
+            lyd_unlink_tree(node);
+            if (lyd_insert_sibling(mod_info->data, node, &mod_info->data)) {
+                sr_errinfo_new_ly(&err_info, LYD_CTX(mod_info->data), NULL);
+                goto cleanup;
+            }
+        }
+    }
+
     /* validate */
     op_type = ((op->schema->nodetype & (LYS_RPC | LYS_ACTION)) ?
             (output ? LYD_TYPE_REPLY_YANG : LYD_TYPE_RPC_YANG) : LYD_TYPE_NOTIF_YANG);
     if (lyd_validate_op(top_op, mod_info->data, op_type, NULL)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, top_op);
         sr_errinfo_new(&err_info, SR_ERR_VALIDATION_FAILED, "%s %svalidation failed.",
                 (op->schema->nodetype == LYS_NOTIF) ? "Notification" : ((op->schema->nodetype == LYS_RPC) ? "RPC" : "Action"),
                 (op->schema->nodetype == LYS_NOTIF) ? "" : (output ? "output " : "input "));
@@ -2281,7 +2486,18 @@ sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct lyd_node *op, int 
     }
 
 cleanup:
+    if (set && op_ext_parent) {
+        for (i = 0; i < set->count; ++i) {
+            node = set->dnodes[i];
+            lyd_unlink_tree(node);
+            if (lyd_insert_ext(op_ext_parent, node)) {
+                sr_errinfo_new_ly(&err_info, LYD_CTX(op_ext_parent), node);
+            }
+        }
+    }
+
     free(parent_xpath);
+    free(ext_children_path);
     ly_set_free(set, NULL);
     return err_info;
 }
@@ -2325,7 +2541,7 @@ sr_modinfo_get_filter_nacm(sr_session_ctx_t *session, struct ly_set **result, in
                 for (j = 0; j < i; ++j) {
                     if (lyd_dup_single((*result)->dnodes[j], NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_PARENTS |
                             LYD_DUP_WITH_FLAGS, &node)) {
-                        sr_errinfo_new_ly(&err_info, session->conn->ly_ctx);
+                        sr_errinfo_new_ly(&err_info, session->conn->ly_ctx, NULL);
                         goto cleanup;
                     }
                     if (ly_set_add(result_dup, node, 1, NULL)) {
@@ -2346,7 +2562,7 @@ sr_modinfo_get_filter_nacm(sr_session_ctx_t *session, struct ly_set **result, in
             /* other subtrees were duplicated so duplicate all */
             if (lyd_dup_single((*result)->dnodes[i], NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_PARENTS |
                     LYD_DUP_WITH_FLAGS, &node)) {
-                sr_errinfo_new_ly(&err_info, session->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, session->conn->ly_ctx, NULL);
                 goto cleanup;
             }
             if (ly_set_add(result_dup, node, 1, NULL)) {
@@ -2424,12 +2640,16 @@ sr_modinfo_get_filter(struct sr_mod_info_s *mod_info, const char *xpath, sr_sess
                 /* data will be changed, we cannot use the cache anymore */
                 lyd_dup_siblings(mod_info->data, NULL, LYD_DUP_RECURSIVE | LYD_DUP_WITH_FLAGS, &mod_info->data);
                 mod_info->data_cached = 0;
+
+                /* CACHE READ UNLOCK */
+                sr_rwunlock(&mod_info->conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_READ,
+                        mod_info->conn->cid, __func__);
             }
 
             /* apply any currently handled changes (diff) or additional performed ones (edit) to get
              * the session-specific data tree */
             if (lyd_diff_apply_module(&mod_info->data, diff, mod->ly_mod, is_oper_ds ? sr_lyd_diff_apply_cb : NULL, NULL)) {
-                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+                sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
                 goto cleanup;
             }
             if ((err_info = sr_edit_mod_apply(edit, mod->ly_mod, is_oper_ds, &mod_info->data, NULL, NULL))) {
@@ -2441,12 +2661,12 @@ sr_modinfo_get_filter(struct sr_mod_info_s *mod_info, const char *xpath, sr_sess
     if (mod_info->data) {
         /* filter return data using the xpath */
         if (lyd_find_xpath3(NULL, mod_info->data, xpath, NULL, result)) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
     } else {
         if (ly_set_new(result)) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
     }
@@ -2515,7 +2735,7 @@ sr_modinfo_generate_config_change_notif(struct sr_mod_info_s *mod_info, sr_sessi
     }
 
     /* get subscriber count */
-    err_info = sr_notif_find_subscriber(mod_info->conn, "ietf-netconf-notifications", &notif_subs, &notif_sub_count);
+    err_info = sr_notif_find_subscriber(mod_info->conn, "ietf-netconf-notifications", &notif_subs, &notif_sub_count, NULL);
 
     /* EXT READ UNLOCK */
     sr_shmext_conn_remap_unlock(mod_info->conn, SR_LOCK_READ, 0, __func__);
@@ -2549,51 +2769,51 @@ sr_modinfo_generate_config_change_notif(struct sr_mod_info_s *mod_info, sr_sessi
 
     /* generate notifcation with all the changes */
     if (lyd_new_path(NULL, mod_info->conn->ly_ctx, "/ietf-netconf-notifications:netconf-config-change", NULL, 0, &notif)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
 
     /* changed-by (everything was caused by user, we do not know what changes are implicit) */
     if (lyd_new_inner(notif, NULL, "changed-by", 0, &root)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
 
     /* changed-by username */
     if (lyd_new_term(root, NULL, "username", session->user, 0, NULL)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
 
     /* changed-by NETCONF session-id (unknown) */
     if (lyd_new_term(root, NULL, "session-id", "0", 0, NULL)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
 
     /* datastore */
     if (lyd_new_term(notif, NULL, "datastore", sr_ds2str(mod_info->ds), 0, NULL)) {
-        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+        sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
         goto cleanup;
     }
 
     while (!(err_info = sr_diff_set_getnext(set, &idx, &elem, &op)) && elem) {
         /* edit (list instance) */
         if (lyd_new_list(notif, NULL, "edit", 0, &root)) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
 
         /* edit target */
         xpath = lyd_path(elem, LYD_PATH_STD, NULL, 0);
         if (!xpath) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
         lyrc = lyd_new_term(root, NULL, "target", xpath, 0, NULL);
         free(xpath);
         if (lyrc) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
 
@@ -2617,7 +2837,7 @@ sr_modinfo_generate_config_change_notif(struct sr_mod_info_s *mod_info, sr_sessi
             goto cleanup;
         }
         if (lyd_new_term(root, NULL, "operation", op_enum, 0, NULL)) {
-            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+            sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx, NULL);
             goto cleanup;
         }
     }
@@ -2723,15 +2943,27 @@ sr_modinfo_is_changed(struct sr_mod_info_s *mod_info)
 void
 sr_modinfo_erase(struct sr_mod_info_s *mod_info)
 {
-    uint32_t i;
+    struct sr_mod_info_mod_s *mod;
+    uint32_t i, j;
 
     lyd_free_siblings(mod_info->diff);
-    if (!mod_info->data_cached) {
+    if (mod_info->data_cached) {
+        /* CACHE READ UNLOCK */
+        sr_rwunlock(&mod_info->conn->running_cache_lock, SR_CONN_RUN_CACHE_LOCK_TIMEOUT, SR_LOCK_READ,
+                mod_info->conn->cid, __func__);
+    } else {
         lyd_free_siblings(mod_info->data);
     }
 
     for (i = 0; i < mod_info->mod_count; ++i) {
-        free(mod_info->mods[i].xpaths);
+        mod = &mod_info->mods[i];
+
+        if (mod->state & MOD_INFO_XPATH_DYN) {
+            for (j = 0; j < mod->xpath_count; ++j) {
+                free((char *)mod->xpaths[j]);
+            }
+        }
+        free(mod->xpaths);
     }
 
     free(mod_info->mods);

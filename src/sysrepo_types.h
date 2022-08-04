@@ -102,8 +102,9 @@ typedef struct sr_session_ctx_s sr_session_ctx_t;
  */
 typedef enum {
     SR_CONN_DEFAULT = 0,            /**< No special behaviour. */
-    SR_CONN_CACHE_RUNNING = 1       /**< Always cache running datastore data which makes mainly repeated retrieval of data
+    SR_CONN_CACHE_RUNNING = 1,      /**< Always cache running datastore data which makes mainly repeated retrieval of data
                                          much faster. Affects all sessions created on this connection. */
+    SR_CONN_CTX_SET_PRIV_PARSED = 2 /**< Use LY_CTX_SET_PRIV_PARSED option for the connection libyang context. */
 } sr_conn_flag_t;
 
 /**
@@ -280,7 +281,7 @@ struct sr_val_s {
 typedef struct sr_val_s sr_val_t;
 
 /**
- * @brief Flags used to override default data get behaviour on ::SR_DS_OPERATIONAL by ::sr_get_data call.
+ * @brief Flags used to override default data get behaviour on ::SR_DS_OPERATIONAL.
  */
 typedef enum {
     SR_OPER_DEFAULT = 0,             /**< No special behaviour. */
@@ -293,11 +294,22 @@ typedef enum {
                                           one inherit the origin from parents. */
 } sr_get_oper_flag_t;
 
+#define SR_OPER_MASK 31              /**< Mask for all get oper data flags. */
+
+/**
+ * @brief Flags used to override default data get behavior.
+ */
+typedef enum {
+    SR_GET_NO_FILTER = 32            /**< Do not apply the filter and return the whole "base" data which the filter
+                                          would normally be applied on. The filter is used only when deciding what data
+                                          to retrieve from subscribers and similar optimization cases. */
+} sr_get_flag_t;
+
 /**
  * @brief Options overriding default get handling by ::sr_get_data call,
- * it is supposed to be bitwise OR-ed value of any ::sr_get_oper_flag_t flags.
+ * it is supposed to be a bitmask ::sr_get_oper_flag_t and ::sr_get_flag_t flags.
  */
-typedef uint32_t sr_get_oper_options_t;
+typedef uint32_t sr_get_options_t;
 
 /** @} getdata */
 

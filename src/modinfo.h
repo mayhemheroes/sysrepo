@@ -35,6 +35,7 @@
 
 #define MOD_INFO_DATA       0x0100 /* module data were loaded */
 #define MOD_INFO_CHANGED    0x0200 /* module data were changed */
+#define MOD_INFO_XPATH_DYN  0x0400 /* module XPaths are dynamically allocated and need to be freed */
 
 /**
  * @brief Mod info structure, used for keeping all relevant modules for a data operation.
@@ -66,11 +67,12 @@ struct sr_mod_info_s {
  *
  * @param[in] ly_mod Module to be added.
  * @param[in] xpath Optional XPath selecting the required data of @p ly_mod.
+ * @param[in] dup_xpath Whether to duplicate @p xpath or use it directly.
  * @param[in] no_dup_check Skip duplicate module check and assume it was not yet added.
  * @param[in,out] mod_info Mod info to add the module to.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int no_dup_check,
+sr_error_info_t *sr_modinfo_add(const struct lys_module *ly_mod, const char *xpath, int dup_xpath, int no_dup_check,
         struct sr_mod_info_s *mod_info);
 
 /**
@@ -99,11 +101,12 @@ sr_error_info_t *sr_modinfo_collect_edit(const struct lyd_node *edit, struct sr_
  * @param[in] xpath XPath to be evaluated.
  * @param[in] ds Target datastore where the @p xpath will be evaluated.
  * @param[in] store_xpath Whether to store @p xpath as module xpath (filtering required data).
+ * @param[in] dup_xpath Whether to duplicate @p xpath if it is being stored.
  * @param[in,out] mod_info Mod info to add to.
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_modinfo_collect_xpath(const struct ly_ctx *ly_ctx, const char *xpath, sr_datastore_t ds,
-        int store_xpath, struct sr_mod_info_s *mod_info);
+        int store_xpath, int dup_xpath, struct sr_mod_info_s *mod_info);
 
 /**
  * @brief Collect required modules of (MOD_INFO_REQ & MOD_INFO_CHANGED) | MOD_INFO_INV_DEP modules in mod info.
@@ -113,6 +116,16 @@ sr_error_info_t *sr_modinfo_collect_xpath(const struct ly_ctx *ly_ctx, const cha
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_modinfo_collect_deps(struct sr_mod_info_s *mod_info);
+
+/**
+ * @brief Collect required modules and XPath for all mounted data and parent-reference nodes in schema-mount ext data
+ * in mod info.
+ *
+ * @param[in] mp_node Mount-point schema node.
+ * @param[in,out] mod_info Mod info to add to.
+ * @return err_info, NULL on success.
+ */
+sr_error_info_t *sr_modinfo_collect_ext_deps(const struct lysc_node *mp_node, struct sr_mod_info_s *mod_info);
 
 /**
  * @brief Check permissions of all the modules in a mod info.
@@ -188,11 +201,11 @@ void sr_modinfo_changesub_rdunlock(struct sr_mod_info_s *mod_info);
  * @param[in] orig_name Event originator name.
  * @param[in] orig_data Event originator data.
  * @param[in] timeout_ms Operational callback timeout in milliseconds.
- * @param[in] opts Get oper data options, ignored if getting only ::SR_DS_OPERATIONAL data (edit).
+ * @param[in] get_oper_opts Get oper data options, ignored if getting only ::SR_DS_OPERATIONAL data (edit).
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache, const char *orig_name,
-        const void *orig_data, uint32_t timeout_ms, sr_get_oper_options_t opts);
+        const void *orig_data, uint32_t timeout_ms, sr_get_oper_flag_t get_oper_opts);
 
 #define SR_MI_NEW_DEPS          0x01    /**< new modules are not required (MOD_INFO_REQ) but only dpendencies (MOD_INFO_DEP) */
 #define SR_MI_LOCK_UPGRADEABLE  0x02    /**< only valid for a read lock, make it upgradeable into a write lock */
@@ -216,11 +229,11 @@ sr_error_info_t *sr_modinfo_data_load(struct sr_mod_info_s *mod_info, int cache,
  * @param[in] orig_data Event originator data.
  * @param[in] timeout_ms Timeout for operational callbacks.
  * @param[in] ds_lock_timeout_ms Timeout in ms for DS-lock in case it is required and locked, if 0 no waiting is performed.
- * @param[in] get_opts Get operational data options, ignored if getting only ::SR_DS_OPERATIONAL data (edit).
+ * @param[in] get_oper_opts Get oper data options, ignored if getting only ::SR_DS_OPERATIONAL data (edit).
  */
 sr_error_info_t *sr_modinfo_consolidate(struct sr_mod_info_s *mod_info, int mod_deps, sr_lock_mode_t mod_lock,
         int mi_opts, uint32_t sid, const char *orig_name, const void *orig_data, uint32_t timeout_ms,
-        uint32_t ds_lock_timeout_ms, sr_get_oper_options_t get_opts);
+        uint32_t ds_lock_timeout_ms, sr_get_oper_flag_t get_oper_opts);
 
 /**
  * @brief Validate data for modules in mod info.
@@ -258,6 +271,7 @@ sr_error_info_t *sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct l
  * @param[in] xpath Selected data.
  * @param[in] session Sysrepo session.
  * @param[out] result Resulting set of matching nodes.
+ * @param[out] dup Set if @p result was changed to duplicated subtrees.
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_modinfo_get_filter(struct sr_mod_info_s *mod_info, const char *xpath, sr_session_ctx_t *session,
