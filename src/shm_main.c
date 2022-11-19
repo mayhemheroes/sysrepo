@@ -382,6 +382,7 @@ error:
     if (lock_fd > -1) {
         char *path;
         sr_error_info_t *err_info_2 = NULL;
+
         close(lock_fd);
         if ((err_info_2 = sr_path_conn_lockfile(cid, 0, &path))) {
             sr_errinfo_free(&err_info_2);
@@ -452,12 +453,11 @@ sr_shmmain_open(sr_shm_t *shm, int *created)
 {
     sr_error_info_t *err_info = NULL;
     sr_main_shm_t *main_shm;
-    char *shm_name = NULL;
+    char *shm_name = NULL, buf[128];
     int creat = 0;
 
-    err_info = sr_path_main_shm(&shm_name);
-    if (err_info) {
-        return err_info;
+    if ((err_info = sr_path_main_shm(&shm_name))) {
+        goto cleanup;
     }
 
     /* try to open the shared memory */
@@ -465,23 +465,27 @@ sr_shmmain_open(sr_shm_t *shm, int *created)
     if ((shm->fd == -1) && (errno == ENOENT)) {
         if (!created) {
             /* we do not want to create the memory now */
-            free(shm_name);
-            return NULL;
+            goto cleanup;
+        }
+
+        /* make sure the directory exists */
+        strcpy(buf, SR_SHM_DIR);
+        if ((err_info = sr_mkpath(buf, SR_DIR_PERM))) {
+            goto cleanup;
         }
 
         /* create shared memory */
         shm->fd = sr_open(shm_name, O_RDWR | O_CREAT | O_EXCL, SR_SHM_PERM);
         creat = 1;
     }
-    free(shm_name);
     if (shm->fd == -1) {
         sr_errinfo_new(&err_info, SR_ERR_SYS, "Failed to open main shared memory (%s).", strerror(errno));
-        goto error;
+        goto cleanup;
     }
 
     /* map it with proper size */
     if ((err_info = sr_shm_remap(shm, creat ? sizeof *main_shm : 0))) {
-        goto error;
+        goto cleanup;
     }
 
     main_shm = (sr_main_shm_t *)shm->addr;
@@ -489,13 +493,13 @@ sr_shmmain_open(sr_shm_t *shm, int *created)
         /* init the memory */
         main_shm->shm_ver = SR_SHM_VER;
         if ((err_info = sr_mutex_init(&main_shm->ext_lock, 1))) {
-            goto error;
+            goto cleanup;
         }
         if ((err_info = sr_rwlock_init(&main_shm->context_lock, 1))) {
-            goto error;
+            goto cleanup;
         }
         if ((err_info = sr_mutex_init(&main_shm->lydmods_lock, 1))) {
-            goto error;
+            goto cleanup;
         }
         ATOMIC_STORE_RELAXED(main_shm->new_sr_cid, 1);
         ATOMIC_STORE_RELAXED(main_shm->new_sr_sid, 1);
@@ -509,16 +513,16 @@ sr_shmmain_open(sr_shm_t *shm, int *created)
         if (main_shm->shm_ver != SR_SHM_VER) {
             sr_errinfo_new(&err_info, SR_ERR_UNSUPPORTED, "Shared memory version mismatch (%" PRIu32 ", expected %d),"
                     " remove the SHM to fix.", main_shm->shm_ver, SR_SHM_VER);
-            goto error;
+            goto cleanup;
         }
     }
 
-    if (created) {
+cleanup:
+    if (err_info) {
+        sr_shm_clear(shm);
+    } else if (created) {
         *created = creat;
     }
-    return NULL;
-
-error:
-    sr_shm_clear(shm);
+    free(shm_name);
     return err_info;
 }

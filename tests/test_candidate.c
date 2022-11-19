@@ -26,7 +26,7 @@
 #include <libyang/libyang.h>
 
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 
 struct state {
     sr_conn_ctx_t *conn;
@@ -37,6 +37,13 @@ static int
 setup_f(void **state)
 {
     struct state *st;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/test.yang",
+        TESTS_SRC_DIR "/files/ietf-interfaces.yang",
+        TESTS_SRC_DIR "/files/iana-if-type.yang",
+        TESTS_SRC_DIR "/files/when1.yang",
+        NULL
+    };
 
     st = calloc(1, sizeof *st);
     *state = st;
@@ -45,16 +52,7 @@ setup_f(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/when1.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_modules(st->conn, schema_paths, TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
 
@@ -69,11 +67,15 @@ static int
 teardown_f(void **state)
 {
     struct state *st = (struct state *)*state;
+    const char *module_names[] = {
+        "when1",
+        "ietf-interfaces",
+        "iana-if-type",
+        "test",
+        NULL
+    };
 
-    sr_remove_module(st->conn, "when1", 0);
-    sr_remove_module(st->conn, "ietf-interfaces", 0);
-    sr_remove_module(st->conn, "iana-if-type", 0);
-    sr_remove_module(st->conn, "test", 0);
+    sr_remove_modules(st->conn, module_names, 0);
 
     sr_disconnect(st->conn);
     free(st);

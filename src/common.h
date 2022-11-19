@@ -4,8 +4,8 @@
  * @brief common routines header
  *
  * @copyright
- * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2022 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2022 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -79,8 +79,14 @@ struct srplg_ntf_s;
 /** timeout for locking connection remap lock; maximum time it can be continuously read/written to (ms) */
 #define SR_CONN_REMAP_LOCK_TIMEOUT 10000
 
-/** timeout for write-locking module cache (ms) */
+/** timeout for write-locking module running plugin cache (ms) */
 #define SR_CONN_RUN_CACHE_LOCK_TIMEOUT 1000
+
+/** timeout for write-locking connection oper cache (ms) */
+#define SR_CONN_OPER_CACHE_LOCK_TIMEOUT 10
+
+/** timeout for write-locking connection subscription oper cache data (ms) */
+#define SR_CONN_OPER_CACHE_DATA_LOCK_TIMEOUT 1000
 
 /** timeout for locking (data of) a module; maximum time a module write lock is expected to be held (ms) */
 #define SR_MOD_LOCK_TIMEOUT 5000
@@ -105,6 +111,9 @@ struct srplg_ntf_s;
 
 /** default timeout for notification subscrption callback (ms) */
 #define SR_NOTIF_CB_TIMEOUT 2000
+
+/** timeout step for operational subscription loop */
+#define SR_SHMSUB_OPER_EVENT_TIMEOUT_STEP_MS 1
 
 /** permissions of main SHM lock file and main/mod/ext SHM */
 #define SR_SHM_PERM 00666
@@ -149,8 +158,33 @@ extern const sr_module_ds_t sr_default_module_ds;
 #define SR_SHM_INITIALIZER {.fd = -1, .size = 0, .addr = NULL}
 
 /** initializer of mod_info structure */
-#define SR_MODINFO_INIT(mi, c, d, d2) mi.ds = (d); mi.ds2 = (d2); mi.diff = NULL; mi.data = NULL; \
-        mi.data_cached = 0; mi.conn = (c); mi.mods = NULL; mi.mod_count = 0
+#define SR_MODINFO_INIT(mi, c, d, d2) (mi).ds = (d); (mi).ds2 = (d2); (mi).diff = NULL; (mi).data = NULL; \
+        (mi).data_cached = 0; (mi).conn = (c); (mi).mods = NULL; (mi).mod_count = 0
+
+/**
+ * @brief Internal information about a module to be installed.
+ */
+typedef struct {
+    /* compatible with sr_install_mod_t */
+    const char *schema_path;
+    const char **features;
+    sr_module_ds_t module_ds;
+    const char *owner;
+    const char *group;
+    mode_t perm;
+
+    /* additional members */
+    const struct lys_module *ly_mod;
+} sr_int_install_mod_t;
+
+/**
+ * @brief Internal information about a module to be updated.
+ */
+typedef struct {
+    const char *schema_path;
+    char *name;
+    LYS_INFORMAT format;
+} sr_int_update_mod_t;
 
 /*
  * From sysrepo.c
@@ -202,30 +236,56 @@ sr_error_info_t *sr_subscr_change_sub_add(sr_subscription_ctx_t *subscr, uint32_
 void sr_subscr_change_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_lock_mode_t has_subs_lock);
 
 /**
- * @brief Add an operational subscription into a subscription structure.
+ * @brief Add an operational get subscription into a subscription structure.
  *
  * @param[in,out] subscr Subscription structure.
  * @param[in] sub_id Unique sub ID.
  * @param[in] sess Subscription session.
  * @param[in] mod_name Subscription module name.
- * @param[in] xpath Subscription XPath.
+ * @param[in] path Subscription path.
  * @param[in] oper_cb Subscription callback.
  * @param[in] private_data Subscription callback private data.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
  * @return err_info, NULL on success.
  */
-sr_error_info_t *sr_subscr_oper_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess,
-        const char *mod_name, const char *xpath, sr_oper_get_items_cb oper_cb, void *private_data,
-        sr_lock_mode_t has_subs_lock);
+sr_error_info_t *sr_subscr_oper_get_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess,
+        const char *mod_name, const char *path, sr_oper_get_items_cb oper_cb, void *private_data,
+        sr_lock_mode_t has_subs_lock, uint32_t prio);
 
 /**
- * @brief Delete an operational subscription from a subscription structure.
+ * @brief Delete an operational get subscription from a subscription structure.
  *
  * @param[in,out] subscr Subscription structure.
  * @param[in] sub_id Unique sub ID.
  * @param[in] has_subs_lock What kind of SUBS lock is held.
  */
-void sr_subscr_oper_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_lock_mode_t has_subs_lock);
+void sr_subscr_oper_get_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_lock_mode_t has_subs_lock);
+
+/**
+ * @brief Add an operational poll subscription into a subscription structure.
+ *
+ * @param[in,out] subscr Subscription structure.
+ * @param[in] sub_id Unique sub ID.
+ * @param[in] sess Subscription session.
+ * @param[in] mod_name Subscription module name.
+ * @param[in] path Subscription path.
+ * @param[in] valid_ms Cached operational data validity interval in ms.
+ * @param[in] sub_opts Subscription options.
+ * @param[in] has_subs_lock What kind of SUBS lock is held.
+ * @return err_info, NULL on success.
+ */
+sr_error_info_t *sr_subscr_oper_poll_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess,
+        const char *mod_name, const char *path, uint32_t valid_ms, sr_subscr_options_t sub_opts,
+        sr_lock_mode_t has_subs_lock);
+
+/**
+ * @brief Delete an operational poll subscription from a subscription structure.
+ *
+ * @param[in,out] subscr Subscription structure.
+ * @param[in] sub_id Unique sub ID.
+ * @param[in] has_subs_lock What kind of SUBS lock is held.
+ */
+void sr_subscr_oper_poll_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_lock_mode_t has_subs_lock);
 
 /**
  * @brief Add a notification subscription into a subscription structure.
@@ -265,6 +325,7 @@ void sr_subscr_notif_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_
  * @param[in] sub_id Unique sub ID.
  * @param[in] sess Subscription session.
  * @param[in] path Subscription RPC path.
+ * @param[in] is_ext Whether the RPC is in an extension or not.
  * @param[in] xpath Subscription XPath.
  * @param[in] rpc_cb Subscription value callback.
  * @param[in] rpc_tree_cb Subscription tree callback.
@@ -274,7 +335,7 @@ void sr_subscr_notif_sub_del(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_subscr_rpc_sub_add(sr_subscription_ctx_t *subscr, uint32_t sub_id, sr_session_ctx_t *sess,
-        const char *path, const char *xpath, sr_rpc_cb rpc_cb, sr_rpc_tree_cb rpc_tree_cb, void *private_data,
+        const char *path, int is_ext, const char *xpath, sr_rpc_cb rpc_cb, sr_rpc_tree_cb rpc_tree_cb, void *private_data,
         uint32_t priority, sr_lock_mode_t has_subs_lock);
 
 /**
@@ -299,14 +360,25 @@ struct modsub_changesub_s *sr_subscr_change_sub_find(const sr_subscription_ctx_t
         const char **module_name, sr_datastore_t *ds);
 
 /**
- * @brief Find a specific operational subscription in a subscription structure.
+ * @brief Find a specific operational get subscription in a subscription structure.
  *
  * @param[in] subscr Subscription structure to use.
  * @param[in] sub_id Subscription ID to find.
  * @param[out] module_name Optional found subscription module name.
  * @return Matching subscription, NULL if not found.
  */
-struct modsub_opersub_s *sr_subscr_oper_sub_find(const sr_subscription_ctx_t *subscr, uint32_t sub_id,
+struct modsub_opergetsub_s *sr_subscr_oper_get_sub_find(const sr_subscription_ctx_t *subscr, uint32_t sub_id,
+        const char **module_name);
+
+/**
+ * @brief Find a specific operational poll subscription in a subscription structure.
+ *
+ * @param[in] subscr Subscription structure to use.
+ * @param[in] sub_id Subscription ID to find.
+ * @param[out] module_name Optional found subscription module name.
+ * @return Matching subscription, NULL if not found.
+ */
+struct modsub_operpollsub_s *sr_subscr_oper_poll_sub_find(const sr_subscription_ctx_t *subscr, uint32_t sub_id,
         const char **module_name);
 
 /**
@@ -402,18 +474,18 @@ sr_error_info_t *sr_notif_call_callback(sr_session_ctx_t *ev_sess, sr_event_noti
 sr_error_info_t *sr_subscr_change_xpath_check(const struct ly_ctx *ly_ctx, const char *xpath, int *valid);
 
 /**
- * @brief Check the XPath of an oper subscription. Optionally learn what kinds (config) of nodes are provided
+ * @brief Check the path of an oper subscription. Optionally learn what kinds (config) of nodes are provided
  * by an operational subscription to determine its type.
  *
  * @param[in] ly_ctx Context to use.
- * @param[in] xpath XPath to check.
+ * @param[in] path Path to check.
  * @param[out] sub_type Optional learned subscription type.
  * @param[in,out] valid If set, does not log and sets to 0 if invalid, 1 if valid.
  * If not set, an error is returned if invalid, otherwise NULL.
  * @return err_info (if @p valid is not set), NULL on success.
  */
-sr_error_info_t *sr_subscr_oper_xpath_check(const struct ly_ctx *ly_ctx, const char *xpath,
-        sr_mod_oper_sub_type_t *sub_type, int *valid);
+sr_error_info_t *sr_subscr_oper_path_check(const struct ly_ctx *ly_ctx, const char *path,
+        sr_mod_oper_get_sub_type_t *sub_type, int *valid);
 
 /**
  * @brief Check the XPath of a notif subscription.
@@ -432,11 +504,13 @@ sr_error_info_t *sr_subscr_notif_xpath_check(const struct lys_module *ly_mod, co
  * @param[in] ly_ctx Context to use.
  * @param[in] xpath XPath to check.
  * @param[out] path Optional simple path ot the RPC/action.
+ * @param[out] is_ext Optional flag whether the operation is defined in a nested extension.
  * @param[in,out] valid If set, does not log and sets to 0 if invalid, 1 if valid.
  * If not set, an error is returned if invalid, otherwise NULL.
  * @return err_info (if @p valid is not set), NULL on success.
  */
-sr_error_info_t *sr_subscr_rpc_xpath_check(const struct ly_ctx *ly_ctx, const char *xpath, char **path, int *valid);
+sr_error_info_t *sr_subscr_rpc_xpath_check(const struct ly_ctx *ly_ctx, const char *xpath, char **path, int *is_ext,
+        int *valid);
 
 /*
  * Utility functions
@@ -556,6 +630,14 @@ sr_error_info_t *sr_remove_module_yang_r(const struct lys_module *ly_mod, const 
         struct ly_set *del_mod);
 
 /**
+ * @brief Check whether a module is internal libyang module.
+ *
+ * @param[in] ly_mod Module to check.
+ * @return 0 if not, non-zero if it is.
+ */
+int sr_ly_module_is_internal(const struct lys_module *ly_mod);
+
+/**
  * @brief Read full contents of a file into a buffer.
  *
  * @param[in] path Path to the file.
@@ -580,14 +662,6 @@ sr_error_info_t *sr_store_module_yang_r(const struct lys_module *ly_mod);
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_collect_module_impl_deps(const struct lys_module *ly_mod, struct ly_set *mod_set);
-
-/**
- * @brief Check whether a module is internal libyang or sysrepo module.
- *
- * @param[in] ly_mod Module to check.
- * @return 0 if not, non-zero if it is.
- */
-int sr_module_is_internal(const struct lys_module *ly_mod);
 
 /**
  * @brief Get default file mode for DS files of a module.
@@ -733,10 +807,19 @@ sr_error_info_t *sr_perm_check(sr_conn_ctx_t *conn, const struct lys_module *ly_
 /**
  * @brief Get current time with an offset.
  *
- * @param[out] ts Current time offset by \p add_ms.
- * @param[in] add_ms Number os milliseconds added.
+ * @param[out] ts Current time offset by @p add_ms.
+ * @param[in] add_ms Number of milliseconds to add.
  */
 void sr_time_get(struct timespec *ts, uint32_t add_ms);
+
+/**
+ * @brief Add milliseconds to a timespec.
+ *
+ * @param[in] ts Optional timespec to add to, use 0 if none.
+ * @param[in] add_ms Number of milliseconds to add.
+ * @return Resulting timespec.
+ */
+struct timespec sr_time_ts_add(const struct timespec *ts, uint32_t add_ms);
 
 /**
  * @brief Compare 2 timespec structures.
@@ -758,6 +841,16 @@ int sr_time_cmp(const struct timespec *ts1, const struct timespec *ts2);
  * @return 0 seconds and -1 nanoseconds if @p ts1 < @p ts2.
  */
 struct timespec sr_time_sub(const struct timespec *ts1, const struct timespec *ts2);
+
+/**
+ * @brief Subtract a timespec from another in milliseconds.
+ *
+ * @param[in] ts1 First timespec to be subtracted from.
+ * @param[in] ts2 Second timespec to subtract.
+ * @return Result of @p ts1 - @p ts2.
+ * @return -1 milliseconds if @p ts1 < @p ts2.
+ */
+int sr_time_sub_ms(const struct timespec *ts1, const struct timespec *ts2);
 
 /**
  * @brief Remap and possibly resize a SHM. Needs WRITE lock for resizing,
@@ -952,15 +1045,6 @@ sr_error_info_t *sr_mlock(pthread_mutex_t *lock, int timeout_ms, const char *fun
 void sr_munlock(pthread_mutex_t *lock);
 
 /**
- * @brief Wrapper for pthread_cond_init().
- *
- * @param[out] cond Condition variable to initialize.
- * @param[in] shared Whether the condition will be shared among processes.
- * @return err_info, NULL on error.
- */
-sr_error_info_t *sr_cond_init(pthread_cond_t *cond, int shared);
-
-/**
  * @brief Initialize a sysrepo RW lock.
  *
  * @param[in,out] rwlock RW lock to initialize.
@@ -1045,11 +1129,37 @@ void sr_rwunlock(sr_rwlock_t *rwlock, int timeout_ms, sr_lock_mode_t mode, sr_ci
 int sr_conn_is_alive(sr_cid_t cid);
 
 /**
- * @brief Flush all cached data of a connection in all its DS plugins.
+ * @brief Flush all cached running data of a connection in all its DS plugins.
  *
  * @param[in] conn Connection to use.
  */
-void sr_conn_flush_cache(sr_conn_ctx_t *conn);
+void sr_conn_running_cache_flush(sr_conn_ctx_t *conn);
+
+/**
+ * @brief Add a new oper cache entry into a connection.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] sub_id Subscription ID of the oper poll subscription.
+ * @param[in] module_name Subscription module name.
+ * @param[in] path Subscription path.
+ * @return err_info, NULL on success.
+ */
+sr_error_info_t *sr_conn_oper_cache_add(sr_conn_ctx_t *conn, uint32_t sub_id, const char *module_name, const char *path);
+
+/**
+ * @brief Delete an oper cache entry in a connection.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] sub_id Subscription ID to delete.
+ */
+void sr_conn_oper_cache_del(sr_conn_ctx_t *conn, uint32_t sub_id);
+
+/**
+ * @brief Flush all cached oper data of a connection.
+ *
+ * @param[in] conn Connection to use.
+ */
+void sr_conn_oper_cache_flush(sr_conn_ctx_t *conn);
 
 /**
  * @brief Wrapper to realloc() that frees memory on failure.
@@ -1111,6 +1221,16 @@ char *sr_get_first_ns(const char *expr);
  * @return err_info, NULL on success.
  */
 sr_error_info_t *sr_get_trim_predicates(const char *expr, char **expr2);
+
+/**
+ * @brief Learn schema file module name and format.
+ *
+ * @param[in] schema_path Path to the module file.
+ * @param[out] module_name Name of the module.
+ * @param[out] format Module format.
+ * @return err_info, NULL on success.
+ */
+sr_error_info_t *sr_get_schema_name_format(const char *schema_path, char **module_name, LYS_INFORMAT *format);
 
 /**
  * @brief Get datastore string name.
@@ -1305,12 +1425,33 @@ sr_error_info_t *sr_lyd_get_enabled_xpath(struct lyd_node **data, char **xpaths,
 sr_error_info_t *sr_lyd_xpath_complement(struct lyd_node **data, const char *xpath);
 
 /**
+ * @brief Safely free a subtree when there is also a pointer that may point to it.
+ *
+ * @param[in] tree Tree to free.
+ * @param[in,out] first Pointer to the first top-level node that may actually be @p tree.
+ */
+void sr_lyd_free_tree_safe(struct lyd_node *tree, struct lyd_node **first);
+
+/**
+ * @brief Parse initial data of new module(s), if any.
+ *
+ * @param[in] new_ctx New libyang context for parsing the data.
+ * @param[in] data Optional initial data in @p format to set.
+ * @param[in] data_path Optional path to a data file in @p format to set.
+ * @param[in] format Format of @p data or @p data_path file.
+ * @param[out] mod_data Initial module(s) data.
+ * @return err_info, NULL on success.
+ */
+sr_error_info_t *sr_lyd_parse_module_data(const struct ly_ctx *ly_ctx, const char *data, const char *data_path,
+        LYD_FORMAT format, struct lyd_node **mod_data);
+
+/**
  * @brief Get a hash of a string value.
  *
  * @param[in] str String to hash.
  * @return String hash.
  */
-uint32_t sr_str_hash(const char *str);
+uint32_t sr_str_hash(const char *str, uint32_t priority);
 
 /**
  * @brief Trim last node from an XPath.

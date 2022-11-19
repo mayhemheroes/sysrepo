@@ -29,7 +29,7 @@
 #include <libyang/libyang.h>
 
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 
 struct state {
     sr_conn_ctx_t *conn;
@@ -40,6 +40,12 @@ static int
 setup(void **state, int cached)
 {
     struct state *st;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/simple.yang",
+        TESTS_SRC_DIR "/files/simple-aug.yang",
+        TESTS_SRC_DIR "/files/defaults.yang",
+        NULL
+    };
 
     st = calloc(1, sizeof *st);
     *state = st;
@@ -48,13 +54,7 @@ setup(void **state, int cached)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/simple.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/simple-aug.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/defaults.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_modules(st->conn, schema_paths, TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
 
@@ -81,10 +81,14 @@ static int
 teardown_f(void **state)
 {
     struct state *st = (struct state *)*state;
+    const char *module_names[] = {
+        "simple-aug",
+        "simple",
+        "defaults",
+        NULL
+    };
 
-    sr_remove_module(st->conn, "simple-aug", 0);
-    sr_remove_module(st->conn, "simple", 0);
-    sr_remove_module(st->conn, "defaults", 0);
+    sr_remove_modules(st->conn, module_names, 0);
 
     sr_disconnect(st->conn);
     free(st);

@@ -33,7 +33,7 @@
 
 #include "common.h"
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 
 const time_t start_ts = 1550233816;
 
@@ -64,7 +64,24 @@ setup(void **state)
 {
     struct state *st;
     uint32_t nc_id;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/test.yang",
+        TESTS_SRC_DIR "/files/ietf-interfaces.yang",
+        TESTS_SRC_DIR "/files/iana-if-type.yang",
+        TESTS_SRC_DIR "/files/ops-ref.yang",
+        TESTS_SRC_DIR "/files/ops.yang",
+        TESTS_SRC_DIR "/files/sm.yang",
+        NULL
+    };
     const char *ops_ref_feats[] = {"feat1", NULL};
+    const char **features[] = {
+        NULL,
+        NULL,
+        NULL,
+        ops_ref_feats,
+        NULL,
+        NULL
+    };
 
     st = calloc(1, sizeof *st);
     *state = st;
@@ -73,22 +90,7 @@ setup(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", ops_ref_feats) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/sm.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_modules(st->conn, schema_paths, TESTS_SRC_DIR "/files", features) != SR_ERR_OK) {
         return 1;
     }
 
@@ -115,17 +117,21 @@ teardown(void **state)
 {
     struct state *st = (struct state *)*state;
     int ret = 0;
+    const char *module_names[] = {
+        "sm",
+        "ops",
+        "ops-ref",
+        "iana-if-type",
+        "ietf-interfaces",
+        "test",
+        NULL
+    };
 
     if (st->ly_ctx) {
         sr_release_context(st->conn);
     }
 
-    ret += sr_remove_module(st->conn, "sm", 0);
-    ret += sr_remove_module(st->conn, "ops", 0);
-    ret += sr_remove_module(st->conn, "ops-ref", 0);
-    ret += sr_remove_module(st->conn, "iana-if-type", 0);
-    ret += sr_remove_module(st->conn, "ietf-interfaces", 0);
-    ret += sr_remove_module(st->conn, "test", 0);
+    ret += sr_remove_modules(st->conn, module_names, 0);
 
     sr_disconnect(st->conn);
     pthread_barrier_destroy(&st->barrier);
@@ -481,7 +487,7 @@ test_oper_dep(void **state)
     assert_int_equal(ret, SR_ERR_OK);
     assert_int_equal(err_info->err_count, 2);
     assert_string_equal(err_info->err[0].message, "Invalid instance-identifier \"/ops:cont/list1[k='key']/cont2\" value "
-            "- required instance not found. (Schema location \"/ops:notif3/list2/l15\", data location \"/ops:notif3/list2[k='k']/l15\".)");
+            "- required instance not found. (Data location \"/ops:notif3/list2[k='k']/l15\".)");
     assert_string_equal(err_info->err[1].message, "Notification validation failed.");
 
     /* subscribe to required ops oper data and some non-required */
@@ -497,8 +503,8 @@ test_oper_dep(void **state)
     ret = sr_session_get_error(st->sess, &err_info);
     assert_int_equal(ret, SR_ERR_OK);
     assert_int_equal(err_info->err_count, 2);
-    assert_string_equal(err_info->err[0].message, "Invalid leafref value \"l1-val\" - no existing target instance \"/or:l1\". "
-            "(Schema location \"/ops:notif3/list2/l14\", data location \"/ops:notif3/list2[k='k']/l14\".)");
+    assert_string_equal(err_info->err[0].message, "Invalid leafref value \"l1-val\" - no target instance \"/or:l1\" with the same value. "
+            "(Data location \"/ops:notif3/list2[k='k']/l14\".)");
     assert_string_equal(err_info->err[1].message, "Notification validation failed.");
 
     /* subscribe to required ops-ref oper data and some non-required */
@@ -1650,15 +1656,14 @@ ly_ext_data_cb(const struct lysc_ext_instance *ext, void *user_data, void **ext_
 }
 
 static void
-notif_schema_mount_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_notif_type_t notif_type, const char *xpath,
-        const sr_val_t *values, const size_t values_cnt, struct timespec *timestamp, void *private_data)
+notif_schema_mount_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_notif_type_t notif_type,
+        const struct lyd_node *notif, struct timespec *timestamp, void *private_data)
 {
     struct state *st = (struct state *)private_data;
+    char *str;
 
     (void)session;
     (void)sub_id;
-    (void)values;
-    (void)values_cnt;
     (void)timestamp;
 
     if (notif_type == SR_EV_NOTIF_TERMINATED) {
@@ -1668,15 +1673,47 @@ notif_schema_mount_cb(sr_session_ctx_t *session, uint32_t sub_id, const sr_ev_no
 
     assert_int_equal(notif_type, SR_EV_NOTIF_REALTIME);
 
+    while (notif->parent) {
+        notif = lyd_parent(notif);
+    }
+
     switch (ATOMIC_LOAD_RELAXED(st->cb_called)) {
     case 0:
-        assert_string_equal(xpath, "/sm:root/ops:notif4");
+        lyd_print_mem(&str, notif, LYD_XML, 0);
+        assert_string_equal(str,
+                "<root xmlns=\"urn:sm\">\n"
+                "  <notif4 xmlns=\"urn:ops\">\n"
+                "    <l>val</l>\n"
+                "  </notif4>\n"
+                "</root>\n");
+        free(str);
         break;
     case 1:
-        assert_string_equal(xpath, "/sm:root/ops:cont/cont3/notif2");
+        lyd_print_mem(&str, notif, LYD_XML, 0);
+        assert_string_equal(str,
+                "<root xmlns=\"urn:sm\">\n"
+                "  <cont xmlns=\"urn:ops\">\n"
+                "    <cont3>\n"
+                "      <notif2>\n"
+                "        <l13 xmlns:o=\"urn:ops\">/o:cont/o:l12</l13>\n"
+                "      </notif2>\n"
+                "    </cont3>\n"
+                "  </cont>\n"
+                "</root>\n");
+        free(str);
         break;
     case 2:
-        assert_string_equal(xpath, "/sm:root/ops:notif3");
+        lyd_print_mem(&str, notif, LYD_XML, 0);
+        assert_string_equal(str,
+                "<root xmlns=\"urn:sm\">\n"
+                "  <notif3 xmlns=\"urn:ops\">\n"
+                "    <list2>\n"
+                "      <k>val</k>\n"
+                "      <l14>l1-starting-with</l14>\n"
+                "    </list2>\n"
+                "  </notif3>\n"
+                "</root>\n");
+        free(str);
         break;
     default:
         fail();
@@ -1726,7 +1763,7 @@ test_schema_mount(void **state)
     sr_set_ext_data_searchdir(st->conn, TESTS_SRC_DIR "/files");
 
     /* subscribe for the notifications */
-    ret = sr_notif_subscribe(st->sess, "sm", NULL, NULL, NULL, notif_schema_mount_cb, st, 0, &sub);
+    ret = sr_notif_subscribe_tree(st->sess, "sm", NULL, NULL, NULL, notif_schema_mount_cb, st, 0, &sub);
     assert_int_equal(ret, SR_ERR_OK);
 
     /* send simple notif4 */

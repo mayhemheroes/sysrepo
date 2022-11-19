@@ -4,8 +4,8 @@
  * @brief public API sysrepo header
  *
  * @copyright
- * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2022 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2022 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -517,8 +517,8 @@ int sr_install_module(sr_conn_ctx_t *conn, const char *schema_path, const char *
  * @param[in] owner Optional initial owner of the module data, process user by default.
  * @param[in] group Optional initial group of the module data, process group by default.
  * @param[in] perm Optional initial permissions of the module data, otherwise system defaults are applied.
- * @param[in] data Optional initial data in @p format to set.
- * @param[in] data_path Optional path to a data file in @p format to set.
+ * @param[in] data Optional initial data in @p format to set, only if @p data_path is not set.
+ * @param[in] data_path Optional path to an initial data file in @p format to set, only if @p data is not set.
  * @param[in] format Format of @p data or @p data_path file.
  * @return Error code (::SR_ERR_OK on success).
  */
@@ -527,16 +527,60 @@ int sr_install_module2(sr_conn_ctx_t *conn, const char *schema_path, const char 
         const char *data_path, LYD_FORMAT format);
 
 /**
+ * @brief Install new schemas (modules) into sysrepo in a batch.
+ *
+ * For all datastores and notifications the default plugins are used.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] schema_paths Array of paths to the new schemas terminated by NULL. Can have either YANG or YIN extension/format.
+ * @param[in] search_dirs Optional search directories for import schemas, supports the format `<dir>[:<dir>]*`.
+ * @param[in] features Array of the same length as @p schema_paths (minus the last NULL). Each item is an array of
+ * enabled features ended with NULL for the @p schema_paths on the same index. Can be NULL for leaving all
+ * the features disabled.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_install_modules(sr_conn_ctx_t *conn, const char **schema_paths, const char *search_dirs,
+        const char ***features);
+
+/**
+ * @brief Install new schemas (modules) into sysrepo in a batch with all the available options.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] modules Array of new modules to be installed with all their information.
+ * @param[in] module_count Count of @p modules.
+ * @param[in] search_dirs Optional search directories for import schemas, supports the format `<dir>[:<dir>]*`.
+ * @param[in] data Optional initial data of all the modules in @p format to set, only if @p data_path is not set.
+ * @param[in] data_path Optional path to an initial data file of all the modules in @p format to set, only if @p data
+ * is not set.
+ * @param[in] format Format of @p data or @p data_path file.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_install_modules2(sr_conn_ctx_t *conn, const sr_install_mod_t *modules, uint32_t module_count,
+        const char *search_dirs, const char *data, const char *data_path, LYD_FORMAT format);
+
+/**
  * @brief Remove an installed module from sysrepo.
  *
  * Required WRITE access.
  *
  * @param[in] conn Connection to use.
  * @param[in] module_name Name of the module to remove.
- * @param[in] force If there are other installed modules depending on this one, remove them, too.
+ * @param[in] force If there are other installed modules depending on @p module_name, remove them, too.
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_remove_module(sr_conn_ctx_t *conn, const char *module_name, int force);
+
+/**
+ * @brief Remove installed modules from sysrepo.
+ *
+ * Required WRITE access.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] module_names Array of names of modules to remove terminated by NULL.
+ * @param[in] force If there are other installed modules depending on @p module_names, remove them, too.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_remove_modules(sr_conn_ctx_t *conn, const char **module_names, int force);
 
 /**
  * @brief Update an installed schema (module) to a new revision.
@@ -549,6 +593,18 @@ int sr_remove_module(sr_conn_ctx_t *conn, const char *module_name, int force);
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_update_module(sr_conn_ctx_t *conn, const char *schema_path, const char *search_dirs);
+
+/**
+ * @brief Update installed schemas (modules) to new revisions in a batch.
+ *
+ * Required WRITE access.
+ *
+ * @param[in] conn Connection to use.
+ * @param[in] schema_paths Array of paths to the new schemas terminated by NULL. Can have either YANG or YIN extension/format.
+ * @param[in] search_dirs Optional search directories for import schemas, supports the format `<dir>[:<dir>]*`.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_update_modules(sr_conn_ctx_t *conn, const char **schema_paths, const char *search_dirs);
 
 /**
  * @brief Change module replay support.
@@ -647,6 +703,16 @@ int sr_disable_module_feature(sr_conn_ctx_t *conn, const char *module_name, cons
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_get_module_info(sr_conn_ctx_t *conn, sr_data_t **sysrepo_data);
+
+/**
+ * @brief Check whether a module is an internal *libyang* or *sysrepo* module. Evaluates to true
+ * for all the modules that are installed by default when no modules were explicitly added.
+ *
+ * @param[in] ly_mod Module to check.
+ * @return true (0) for an internal module.
+ * @return false (non-zero) for other modules.
+ */
+int sr_is_module_internal(const struct lys_module *ly_mod);
 
 /** @} schema */
 
@@ -875,10 +941,11 @@ int sr_set_item_str(sr_session_ctx_t *session, const char *path, const char *val
  * @brief Prepare to delete the nodes matching the specified xpath. These changes are applied only
  * after calling ::sr_apply_changes. The accepted values are the same as for ::sr_set_item_str.
  *
- * Cannot be used for ::SR_DS_OPERATIONAL. Use ::sr_oper_delete_item_str() instead.
  * If ::SR_EDIT_STRICT flag is set the specified node must must exist in the datastore.
  * If the @p path includes the list keys/leaf-list value, the specified instance is deleted.
  * If the @p path of list/leaf-list does not include keys/value, all instances are deleted.
+ *
+ * For ::SR_DS_OPERATIONAL, the flag is not allowed and list/leaf-list instance must always include its predicate.
  *
  * @param[in] session Session ([DS](@ref sr_datastore_t)-specific) to use.
  * @param[in] path [Path](@ref paths) identifier of the data element to be deleted.
@@ -888,16 +955,7 @@ int sr_set_item_str(sr_session_ctx_t *session, const char *path, const char *val
 int sr_delete_item(sr_session_ctx_t *session, const char *path, const sr_edit_options_t opts);
 
 /**
- * @brief Prepare to delete the nodes matching the specified xpath. These changes are applied only
- * after calling ::sr_apply_changes. The accepted values are the same as for ::sr_set_item_str.
- *
- * Can be used only for ::SR_DS_OPERATIONAL. Use ::sr_delete_item() for other datastores.
- *
- * @param[in] session Session ([DS](@ref sr_datastore_t)-specific) to use.
- * @param[in] path [Path](@ref paths) identifier of the data element to be deleted.
- * @param[in] value String representation of the value deleted.
- * @param[in] opts Options overriding default behavior of this call. ::SR_EDIT_STRICT is not supported.
- * @return Error code (::SR_ERR_OK on success, ::SR_ERR_OPERATION_FAILED if the whole edit was discarded).
+ * @brief Deprecated, use ::sr_delete_item().
  */
 int sr_oper_delete_item_str(sr_session_ctx_t *session, const char *path, const char *value, const sr_edit_options_t opts);
 
@@ -910,8 +968,9 @@ int sr_oper_delete_item_str(sr_session_ctx_t *session, const char *path, const c
  * With default options it recursively creates all missing nodes (containers and
  * lists including their key leaves) in the xpath to the specified node (can be
  * turned off with ::SR_EDIT_NON_RECURSIVE option). If ::SR_EDIT_STRICT flag is set,
- * the node must not exist (otherwise an error is returned). Neither option is allowed
- * for ::SR_DS_OPERATIONAL.
+ * the node must not exist (otherwise an error is returned).
+ *
+ * For ::SR_DS_OPERATIONAL, neither option is allowed.
  *
  * @note To determine current order, you can issue a ::sr_get_items call
  * (without specifying keys of particular list).
@@ -1126,12 +1185,13 @@ int sr_get_event_pipe(sr_subscription_ctx_t *subscription, int *event_pipe);
  *
  * @param[in] subscription Subscription without a listening thread with some new events.
  * @param[in] session Optional session for storing errors.
- * @param[out] stop_time_in Optional time until the nearest notification subscription stop time is elapsed
- * and this function should be called. If there are no subscriptions with stop time in future, it is zeroed.
+ * @param[out] wake_up_in Optional time when a scheduled event occurs and this function should be called again. It can
+ * be the nearest notification subscription stop time or operational poll subscription cache update. If there are no
+ * scheduled events in future, it is zeroed.
  * @return Error code (::SR_ERR_OK on success).
  */
 int sr_subscription_process_events(sr_subscription_ctx_t *subscription, sr_session_ctx_t *session,
-        struct timespec *stop_time_in);
+        struct timespec *wake_up_in);
 
 /**
  * @brief Get the subscription ID of the last created subscription.
@@ -1584,7 +1644,15 @@ int sr_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t 
  */
 
 /**
- * @brief Register for providing operational data at the given xpath.
+ * @brief Register for providing operational data at the given path.
+ *
+ * Usual behaviour is only ONE subscription for ONE XPath. When subscribing to the same XPath that was used in some
+ * previous subscription, ::SR_SUBSCR_OPER_MERGE flag has to be used. Every subscription has its internal priority
+ * based on the order in which they were subscribed. Priority influences merging the operational data from multiple
+ * subscriptions with the same XPath. Operational data returned by later subscriptions overwrite the same data from any
+ * previous subscriptions. When retrieving data all subscription callbacks with the same XPath are called
+ * simultaneously (to achieve this, @p subscription should be different for each subscription so that there are
+ * separate threads listening for each of the events).
  *
  * Required WRITE access.
  *
@@ -1606,14 +1674,42 @@ int sr_notif_sub_modify_stop_time(sr_subscription_ctx_t *subscription, uint32_t 
 int sr_oper_get_subscribe(sr_session_ctx_t *session, const char *module_name, const char *path,
         sr_oper_get_items_cb callback, void *private_data, sr_subscr_options_t opts, sr_subscription_ctx_t **subscription);
 
+/**
+ * @brief Start periodic retrieval and caching of operational data at the given path.
+ *
+ * The operational data are cached in the connection of @p session. When any session created on this connection
+ * requires data of the cached operational get subscription at @p path, the callback is not called and the cached data
+ * are used instead. Additionally, if @p opts include ::SR_SUBSCR_OPER_POLL_DIFF, any changes detected on cache data
+ * refresh are reported to corresponding subscribers. For an operational get subscription, there can only be a
+ * __single__ operational poll subscription with this flag. The first cache update is performed directly by this
+ * function.
+ *
+ * Required READ access.
+ *
+ * @note Be aware of some specific [threading limitations](@ref oper_subs). Especially note that you cannot have
+ * an operational poll subscription in the same @p subscription structure as the operational get subscription being
+ * cached because a dead-lock would occur on cache update.
+ *
+ * @param[in] session Session (not [DS](@ref sr_datastore_t)-specific) to use.
+ * @param[in] module_name Name of the affected module.
+ * @param[in] path [Path](@ref paths) matching the operational get subscription(s) to poll.
+ * @param[in] valid_ms Time the retrieved data are stored in cache until being considered invalid.
+ * @param[in] opts Options overriding default behavior of the subscription, it is supposed to be
+ * a bitwise OR-ed value of any ::sr_subscr_flag_t flags.
+ * @param[in,out] subscription Subscription context, zeroed for first subscription, freed by ::sr_unsubscribe.
+ * @return Error code (::SR_ERR_OK on success).
+ */
+int sr_oper_poll_subscribe(sr_session_ctx_t *session, const char *module_name, const char *path, uint32_t valid_ms,
+        sr_subscr_options_t opts, sr_subscription_ctx_t **subscription);
+
 /** @} oper_subs */
 
 ////////////////////////////////////////////////////////////////////////////////
-// Plugin API
+// sysrepo-plugind Plugin API
 ////////////////////////////////////////////////////////////////////////////////
 
 /**
- * @defgroup plugin_api Plugin API
+ * @defgroup srpd_plugin_api sysrepo-plugind Plugin API
  * @{
  */
 
@@ -1663,7 +1759,7 @@ int sr_oper_get_subscribe(sr_session_ctx_t *session, const char *module_name, co
  */
 #define SRPLG_LOG_DBG(plg_name, ...) srplg_log(plg_name, SR_LL_DBG, __VA_ARGS__)
 
-/** @} plugin */
+/** @} srpd_plugin_api */
 
 /**
  * @internal

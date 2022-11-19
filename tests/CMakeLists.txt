@@ -17,7 +17,7 @@ include_directories(${PROJECT_BINARY_DIR}/tests)
 add_test(NAME headers
     COMMAND ${CMAKE_SOURCE_DIR}/compat/check_includes.sh ${CMAKE_SOURCE_DIR}/src/ ${CMAKE_SOURCE_DIR}/src/executables/ ${CMAKE_SOURCE_DIR}/src/utils/)
 
-set(test_sources "test_common.c")
+set(test_sources "tcommon.c")
 
 # check for pthread_barrier existence
 check_function_exists(pthread_barrier_init SR_HAVE_PTHREAD_BARRIER)
@@ -26,7 +26,7 @@ if(NOT SR_HAVE_PTHREAD_BARRIER)
 endif()
 
 # generate config
-configure_file("${PROJECT_SOURCE_DIR}/tests/test_common.h.in" "${PROJECT_BINARY_DIR}/tests/test_common.h" ESCAPE_QUOTES @ONLY)
+configure_file("${PROJECT_SOURCE_DIR}/tests/tcommon.h.in" "${PROJECT_BINARY_DIR}/tests/tcommon.h" ESCAPE_QUOTES @ONLY)
 
 set(TEST_CLEAR_REPOS_CMD rm -rf ${PROJECT_BINARY_DIR}/test_repositories)
 set(TEST_CLEAR_SHM_CMD find /dev/shm/ -maxdepth 1 -readable -name _tests_sr_* -delete)
@@ -44,13 +44,14 @@ endif()
 
 if(ENABLE_TESTS)
     # format
-    if (${SOURCE_FORMAT_ENABLED})
+    if(${SOURCE_FORMAT_ENABLED})
         add_test(NAME format WORKING_DIRECTORY ${CMAKE_BINARY_DIR} COMMAND cmake --build ${CMAKE_BINARY_DIR} --target format-check)
     endif()
 
     # lists of all the tests
-    set(tests test_modules test_context_change test_validation test_edit test_candidate test_operational test_lock
-        test_apply_changes test_copy_config test_rpc_action test_notif test_get test_process test_multi_connection test_nacm)
+    set(tests test_modules test_context_change test_validation test_edit test_candidate test_oper_pull test_oper_push
+        test_lock test_apply_changes test_copy_config test_rpc_action test_notif test_get test_process
+        test_multi_connection test_nacm test_rotation)
 
     foreach(test_name IN LISTS tests)
         add_executable(${test_name} ${test_sources} ${test_name}.c)
@@ -66,6 +67,13 @@ if(ENABLE_TESTS)
             "SYSREPO_REPOSITORY_PATH=${PROJECT_BINARY_DIR}/test_repositories/${test_name}"
             "SYSREPO_SHM_PREFIX=_tests_sr_${test_name}"
         )
+
+        # avoid loading installed plugins by sysrepo-plugind
+        if(${test_name} STREQUAL "test_rotation")
+            set_property(TEST ${test_name} APPEND PROPERTY ENVIRONMENT
+                "SRPD_PLUGINS_PATH=${PROJECT_BINARY_DIR}/test_repositories/${test_name}/testing")
+        endif()
+
         if(${CMAKE_VERSION} VERSION_GREATER "3.7")
             set_tests_properties(${test_name} PROPERTIES FIXTURES_REQUIRED tests_cleanup)
         endif()
@@ -90,6 +98,13 @@ if(ENABLE_VALGRIND_TESTS)
             "SYSREPO_REPOSITORY_PATH=${PROJECT_BINARY_DIR}/test_repositories/${test_name}"
             "SYSREPO_SHM_PREFIX=_tests_sr_${test_name}"
         )
+
+        # avoid loading installed plugins by sysrepo-plugind
+        if(${test_name} STREQUAL "test_rotation_valgrind")
+            set_property(TEST ${test_name} APPEND PROPERTY ENVIRONMENT
+                "SRPD_PLUGINS_PATH=${PROJECT_BINARY_DIR}/test_repositories/${test_name}/testing")
+        endif()
+
         if(${CMAKE_VERSION} VERSION_GREATER "3.7")
             set_tests_properties(${test_name} PROPERTIES FIXTURES_REQUIRED tests_cleanup)
         endif()

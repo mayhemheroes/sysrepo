@@ -26,7 +26,7 @@
 #include <libyang/libyang.h>
 
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 
 struct state {
     sr_conn_ctx_t *conn;
@@ -37,6 +37,17 @@ static int
 setup_f(void **state)
 {
     struct state *st;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/test.yang",
+        TESTS_SRC_DIR "/files/ietf-interfaces.yang",
+        TESTS_SRC_DIR "/files/iana-if-type.yang",
+        TESTS_SRC_DIR "/files/decimal.yang",
+        TESTS_SRC_DIR "/files/referenced-data.yang",
+        TESTS_SRC_DIR "/files/test-module.yang",
+        TESTS_SRC_DIR "/files/ops-ref.yang",
+        TESTS_SRC_DIR "/files/ops.yang",
+        NULL
+    };
 
     st = calloc(1, sizeof *st);
     *state = st;
@@ -45,28 +56,7 @@ setup_f(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/decimal.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/referenced-data.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test-module.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
-        return 1;
-    }
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
+    if (sr_install_modules(st->conn, schema_paths, TESTS_SRC_DIR "/files", NULL) != SR_ERR_OK) {
         return 1;
     }
 
@@ -81,15 +71,19 @@ static int
 teardown_f(void **state)
 {
     struct state *st = (struct state *)*state;
+    const char *module_names[] = {
+        "decimal",
+        "ietf-interfaces",
+        "iana-if-type",
+        "test",
+        "test-module",
+        "referenced-data",
+        "ops",
+        "ops-ref",
+        NULL
+    };
 
-    sr_remove_module(st->conn, "decimal", 0);
-    sr_remove_module(st->conn, "ietf-interfaces", 0);
-    sr_remove_module(st->conn, "iana-if-type", 0);
-    sr_remove_module(st->conn, "test", 0);
-    sr_remove_module(st->conn, "test-module", 0);
-    sr_remove_module(st->conn, "referenced-data", 0);
-    sr_remove_module(st->conn, "ops", 0);
-    sr_remove_module(st->conn, "ops-ref", 0);
+    sr_remove_modules(st->conn, module_names, 0);
 
     sr_disconnect(st->conn);
     free(st);
@@ -138,6 +132,32 @@ test_edit_item(void **state)
     /* key edit */
     ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces/interface[name='val']/name", "val", NULL, SR_EDIT_STRICT);
     assert_int_equal(ret, SR_ERR_INVAL_ARG);
+
+    /* state data */
+    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces-state/interface[name='val']", NULL, NULL, SR_EDIT_STRICT);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_VALIDATION_FAILED);
+    ret = sr_discard_changes(st->sess);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    sr_session_switch_ds(st->sess, SR_DS_CANDIDATE);
+    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces-state/interface[name='val']", NULL, NULL, SR_EDIT_STRICT);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_VALIDATION_FAILED);
+    ret = sr_discard_changes(st->sess);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    sr_session_switch_ds(st->sess, SR_DS_STARTUP);
+    ret = sr_set_item_str(st->sess, "/ietf-interfaces:interfaces-state/interface[name='val']", NULL, NULL, SR_EDIT_STRICT);
+    assert_int_equal(ret, SR_ERR_OK);
+    ret = sr_apply_changes(st->sess, 0);
+    assert_int_equal(ret, SR_ERR_VALIDATION_FAILED);
+    ret = sr_discard_changes(st->sess);
+    assert_int_equal(ret, SR_ERR_OK);
+
+    sr_session_switch_ds(st->sess, SR_DS_RUNNING);
 
     /* same edits are ignored */
     ret = sr_delete_item(st->sess, "/ietf-interfaces:interfaces/interface[name='eth64']", 0);

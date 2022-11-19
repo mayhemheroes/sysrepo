@@ -22,6 +22,11 @@ module sysrepo-monitoring {
     description
         "Sysrepo YANG datastore monitoring state information.";
 
+    revision "2022-08-19" {
+        description
+            "Added state information for operational poll subscriptions.";
+    }
+
     revision "2022-04-08" {
         description
             "Added NACM statistics.";
@@ -134,6 +139,26 @@ module sysrepo-monitoring {
                     "Module name.";
             }
 
+            list datastore {
+                key "name";
+                description
+                    "Datastore state.";
+
+                leaf name {
+                    type identityref {
+                        base ds:datastore;
+                    }
+                    description
+                        "Datastore name.";
+                }
+
+                leaf last-modified {
+                    type yang:date-and-time;
+                    description
+                        "When the datastore was last modified.";
+                }
+            }
+
             list data-lock {
                 key "cid datastore";
                 description
@@ -178,9 +203,16 @@ module sysrepo-monitoring {
                 uses lock-ds-params;
             }
 
-            list oper-sub-lock {
+            list oper-get-sub-lock {
                 description
-                    "Held module operational subscriptions lock.";
+                    "Held module operational get subscriptions lock.";
+
+                uses lock-params;
+            }
+
+            list oper-poll-sub-lock {
+                description
+                    "Held module operational poll subscriptions lock.";
 
                 uses lock-params;
             }
@@ -237,26 +269,58 @@ module sysrepo-monitoring {
                     }
                 }
 
-                list operational-sub {
+                list operational-get-sub {
                     key "xpath";
                     description
-                        "Operational subscription.";
+                        "Operational get (pull) subscription.";
 
                     leaf xpath {
                         type yang:xpath1.0;
                         description
-                            "Operational data pull subscription XPath.";
+                            "Operational get subscription XPath.";
+                    }
+
+                    list xpath-sub {
+                        min-elements 1;
+                        description
+                            "Operational get subscription for the XPath.";
+
+                        leaf cid {
+                            type conn-ref;
+                            mandatory true;
+                            description
+                                "CID of the connection that this subscription belongs to.";
+                        }
+
+                        leaf suspended {
+                            type boolean;
+                            mandatory true;
+                            description
+                                "Whether the subscription is in the suspended state.";
+                        }
+                    }
+                }
+
+                list operational-poll-sub {
+                    key "xpath";
+                    description
+                        "Operational poll subscription.";
+
+                    leaf xpath {
+                        type yang:xpath1.0;
+                        description
+                            "Operational poll subscription XPath.";
                     }
 
                     leaf cid {
                         type conn-ref;
-                        mandatory true;
                         description
                             "CID of the connection that this subscription belongs to.";
                     }
 
                     leaf suspended {
                         type boolean;
+                        mandatory true;
                         description
                             "Whether the subscription is in the suspended state.";
                     }

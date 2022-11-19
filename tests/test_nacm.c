@@ -26,7 +26,7 @@
 #include <libyang/libyang.h>
 
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 #include "utils/netconf_acm.h"
 
 struct state {
@@ -39,6 +39,10 @@ static int
 setup_f(void **state)
 {
     struct state *st;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/test.yang",
+        NULL
+    };
 
     st = calloc(1, sizeof *st);
     *state = st;
@@ -47,7 +51,7 @@ setup_f(void **state)
         return 1;
     }
 
-    if (sr_install_module(st->conn, TESTS_SRC_DIR "/files/test.yang", TESTS_SRC_DIR "/files", NULL)) {
+    if (sr_install_modules(st->conn, schema_paths, TESTS_SRC_DIR "/files", NULL)) {
         return 1;
     }
 
@@ -66,8 +70,12 @@ static int
 teardown_f(void **state)
 {
     struct state *st = (struct state *)*state;
+    const char *module_names[] = {
+        "test",
+        NULL
+    };
 
-    sr_remove_module(st->conn, "test", 0);
+    sr_remove_modules(st->conn, module_names, 0);
 
     sr_unsubscribe(st->sub);
     sr_nacm_destroy();

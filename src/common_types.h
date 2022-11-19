@@ -4,8 +4,8 @@
  * @brief common types header
  *
  * @copyright
- * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2022 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2022 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 #include <libyang/libyang.h>
 
 #include "compat.h"
+#include "config.h"
 #include "sysrepo_types.h"
 
 /**
@@ -51,7 +52,7 @@ typedef enum {
  */
 typedef struct {
     pthread_mutex_t mutex;          /**< Lock mutex. */
-    pthread_cond_t cond;            /**< Lock condition variable. */
+    sr_cond_t cond;                 /**< Lock condition variable. */
 
     pthread_mutex_t r_mutex;        /**< Mutex for accessing readers, needed because of concurrent reading. */
     sr_cid_t readers[SR_RWLOCK_READ_LIMIT]; /**< CIDs of all READ lock owners (including READ-UPGR), 0s otherwise. */
@@ -129,6 +130,18 @@ struct sr_conn_ctx_s {
         const struct srplg_ntf_s *plugin;   /**< Notification plugin. */
     } *ntf_handles;                 /**< Notification implementation handles. */
     uint32_t ntf_handle_count;      /**< Notification implementaion handle count. */
+
+    struct sr_oper_poll_cache_s {
+        uint32_t sub_id;            /**< Operational poll subscription ID. */
+        char *module_name;          /**< Operational poll subscription module name. */
+        char *path;                 /**< Operational poll/get subscription path. */
+
+        sr_rwlock_t data_lock;      /**< Lock for accessing the data and timestamp. */
+        struct lyd_node *data;      /**< Cached data of a single operational get subscription. */
+        struct timespec timestamp;  /**< Timestamp of the cached operational data. */
+    } *oper_caches;                 /**< Operational get subscription data caches. */
+    uint32_t oper_cache_count;      /**< Operational get subscription data cache count. */
+    sr_rwlock_t oper_cache_lock;    /**< Operational get subscription data cache lock. */
 };
 
 /**
@@ -146,6 +159,7 @@ struct sr_session_ctx_s {
     void *orig_data;                /**< Originator data used for all events sent on this session. */
 
     sr_sub_event_t ev;              /**< Event of a callback session. ::SR_SUB_EV_NONE for standard user sessions. */
+
     struct {
         char *orig_name;            /**< Set originator name by the event originator. */
         void *orig_data;            /**< Set originator data by the event originator. */
@@ -213,11 +227,12 @@ struct sr_subscription_ctx_s {
     } *change_subs;                 /**< Change subscriptions for each module. */
     uint32_t change_sub_count;      /**< Change module subscription count. */
 
-    struct modsub_oper_s {
+    struct modsub_operget_s {
         char *module_name;          /**< Module of the subscriptions. */
-        struct modsub_opersub_s {
+        struct modsub_opergetsub_s {
             uint32_t sub_id;        /**< Unique subscription ID. */
-            char *xpath;            /**< Subscription XPath. */
+            char *path;             /**< Subscription path. */
+            uint32_t priority;      /**< Subscription priority for one XPath */
             sr_oper_get_items_cb cb;    /**< Subscription callback. */
             void *private_data;     /**< Subscription callback private data. */
             sr_session_ctx_t *sess; /**< Subscription session. */
@@ -226,8 +241,21 @@ struct sr_subscription_ctx_s {
             sr_shm_t sub_shm;       /**< Subscription SHM. */
         } *subs;                    /**< Operational subscriptions for each XPath. */
         uint32_t sub_count;         /**< Operational module XPath subscription count. */
-    } *oper_subs;                   /**< Operational subscriptions for each module. */
-    uint32_t oper_sub_count;        /**< Operational module subscription count. */
+    } *oper_get_subs;               /**< Operational get subscriptions for each module. */
+    uint32_t oper_get_sub_count;    /**< Operational get module subscription count. */
+
+    struct modsub_operpoll_s {
+        char *module_name;          /**< Module of the subscriptions. */
+        struct modsub_operpollsub_s {
+            uint32_t sub_id;        /**< Unique subscription ID. */
+            char *path;             /**< Subscription path. */
+            uint32_t valid_ms;      /**< Cached operational data validity interval in ms. */
+            sr_subscr_options_t opts;   /**< Subscription options. */
+            sr_session_ctx_t *sess; /**< Subscription session. */
+        } *subs;                    /**< Operational subscriptions for each XPath. */
+        uint32_t sub_count;         /**< Operational module XPath subscription count. */
+    } *oper_poll_subs;              /**< Operational poll subscriptions for each module. */
+    uint32_t oper_poll_sub_count;   /**< Operational poll module subscription count. */
 
     struct modsub_notif_s {
         char *module_name;          /**< Module of the subscriptions. */
@@ -253,6 +281,7 @@ struct sr_subscription_ctx_s {
 
     struct opsub_rpc_s {
         char *path;                 /**< Subscription RPC/action path. */
+        int is_ext;                 /**< Whether the RPC/action is in an extension or not. */
         struct opsub_rpcsub_s {
             uint32_t sub_id;        /**< Unique subscription ID. */
             char *xpath;            /**< Subscription XPath. */

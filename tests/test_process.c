@@ -26,7 +26,7 @@
 #include <unistd.h>
 
 #include "sysrepo.h"
-#include "tests/test_common.h"
+#include "tests/tcommon.h"
 
 #define sr_assert(cond) if (!(cond)) { TLOG_ERR("\"%s\" not true", #cond); sr_assert_line(); abort(); }
 
@@ -151,17 +151,26 @@ static void
 setup(void)
 {
     sr_conn_ctx_t *conn;
+    const char *schema_paths[] = {
+        TESTS_SRC_DIR "/files/ops-ref.yang",
+        TESTS_SRC_DIR "/files/ops.yang",
+        TESTS_SRC_DIR "/files/ietf-interfaces.yang",
+        TESTS_SRC_DIR "/files/iana-if-type.yang",
+        TESTS_SRC_DIR "/files/mod1.yang",
+        NULL
+    };
     const char *ops_ref_feats[] = {"feat1", NULL};
     const char *mod1_feats[] = {"f1", NULL};
+    const char **features[] = {
+        ops_ref_feats,
+        NULL,
+        NULL,
+        NULL,
+        mod1_feats
+    };
 
     sr_assert(sr_connect(0, &conn) == SR_ERR_OK);
-
-    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ops-ref.yang", TESTS_SRC_DIR "/files", ops_ref_feats) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ops.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/ietf-interfaces.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/iana-if-type.yang", TESTS_SRC_DIR "/files", NULL) == SR_ERR_OK);
-    sr_assert(sr_install_module(conn, TESTS_SRC_DIR "/files/mod1.yang", TESTS_SRC_DIR "/files", mod1_feats) == SR_ERR_OK);
-
+    sr_assert(sr_install_modules(conn, schema_paths, TESTS_SRC_DIR "/files", features) == SR_ERR_OK);
     sr_disconnect(conn);
 }
 
@@ -169,14 +178,18 @@ static void
 teardown(void)
 {
     sr_conn_ctx_t *conn;
+    const char *module_names[] = {
+        "mod1",
+        "ietf-interfaces",
+        "iana-if-type",
+        "ops",
+        "ops-ref",
+        NULL
+    };
 
     sr_assert(sr_connect(0, &conn) == SR_ERR_OK);
 
-    sr_assert(sr_remove_module(conn, "mod1", 0) == SR_ERR_OK);
-    sr_assert(sr_remove_module(conn, "ietf-interfaces", 0) == SR_ERR_OK);
-    sr_assert(sr_remove_module(conn, "iana-if-type", 0) == SR_ERR_OK);
-    sr_assert(sr_remove_module(conn, "ops", 0) == SR_ERR_OK);
-    sr_assert(sr_remove_module(conn, "ops-ref", 0) == SR_ERR_OK);
+    sr_assert(sr_remove_modules(conn, module_names, 0) == SR_ERR_OK);
 
     sr_disconnect(conn);
 }

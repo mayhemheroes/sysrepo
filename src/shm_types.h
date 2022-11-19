@@ -4,8 +4,8 @@
  * @brief header for all SHM types
  *
  * @copyright
- * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2022 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2022 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@
 #include "common_types.h"
 #include "sysrepo_types.h"
 
-#define SR_SHM_VER 10   /**< Main, mod, and ext SHM version of their expected content structures. */
+#define SR_SHM_VER 13   /**< Main, mod, and ext SHM version of their expected content structures. */
 #define SR_MAIN_SHM_LOCK "sr_main_lock"     /**< Main SHM file lock name. */
 
 /**
@@ -55,6 +55,7 @@ typedef enum {
  */
 typedef struct {
     sr_dep_type_t type;                 /**< Dependency type. */
+
     union {
         struct {
             off_t target_path;          /**< Leafref target (offset in mod SHM). */
@@ -137,15 +138,25 @@ typedef struct {
         uint32_t sub_count;     /**< Number of change subscriptions. */
     } change_sub[SR_DS_COUNT];  /**< Change subscriptions for each datastore. */
 
-    sr_rwlock_t oper_lock;      /**< Process-shared lock for reading or preventing changes (READ) or modifying (WRITE)
-                                     operational subscriptions. */
-    off_t oper_subs;            /**< Array of operational subscriptions (offset in ext SHM). */
-    uint32_t oper_sub_count;    /**< Number of operational subscriptions. */
+    sr_rwlock_t oper_get_lock;  /**< Process-shared lock for reading or preventing changes (READ) or modifying (WRITE)
+                                     operational get subscriptions. */
+    off_t oper_get_subs;        /**< Array of operational get subscriptions (offset in ext SHM). */
+    uint32_t oper_get_sub_count; /**< Number of operational get subscriptions. */
+
+    sr_rwlock_t oper_poll_lock; /**< Process-shared lock for reading or preventing changes (READ) or modifying (WRITE)
+                                     operational poll subscriptions. */
+    off_t oper_poll_subs;       /**< Array of operational poll subscriptions (offset in ext SHM). */
+    uint32_t oper_poll_sub_count; /**< Number of operational poll subscriptions. */
 
     sr_rwlock_t notif_lock;     /**< Process-shared lock for reading or preventing changes (READ) or modifying (WRITE)
                                      notification subscriptions. */
     off_t notif_subs;           /**< Array of notification subscriptions (offset in ext SHM). */
     uint32_t notif_sub_count;   /**< Number of notification subscriptions. */
+
+    sr_rwlock_t rpc_ext_lock;   /**< Process-shared lock for reading or preventing changes (READ) or modifying (WRITE)
+                                     ext RPC subscriptions. */
+    off_t rpc_ext_subs;         /**< Array of ext RPC subscriptions (offset in ext SHM). */
+    uint32_t rpc_ext_sub_count; /**< Number of ext RPC subscriptions. */
 } sr_mod_t;
 
 /**
@@ -188,27 +199,49 @@ typedef struct {
 } sr_mod_change_sub_t;
 
 /**
- * @brief Ext SHM module operational subscription type.
+ * @brief Ext SHM module operational get subscription type.
  */
 typedef enum {
-    SR_OPER_SUB_NONE = 0,         /**< Invalid type. */
-    SR_OPER_SUB_STATE,            /**< Providing state data. */
-    SR_OPER_SUB_CONFIG,           /**< Providing configuration data. */
-    SR_OPER_SUB_MIXED             /**< Providing both state and configuration data. */
-} sr_mod_oper_sub_type_t;
+    SR_OPER_GET_SUB_NONE = 0,   /**< Invalid type. */
+    SR_OPER_GET_SUB_STATE,      /**< Providing state data. */
+    SR_OPER_GET_SUB_CONFIG,     /**< Providing configuration data. */
+    SR_OPER_GET_SUB_MIXED       /**< Providing both state and configuration data. */
+} sr_mod_oper_get_sub_type_t;
 
 /**
- * @brief Ext SHM module operational subscription.
+ * @brief Ext SHM module operational XPath get subscription.
+ */
+typedef struct {
+    int opts;                   /**< Subscription options. */
+    uint32_t sub_id;            /**< Unique subscription ID. */
+    uint32_t evpipe_num;        /**< Event pipe number. */
+    uint32_t priority;          /**< Priority of the subscription (automatically generated). */
+    ATOMIC_T suspended;         /**< Whether the subscription is suspended. */
+    sr_cid_t cid;               /**< Connection ID. */
+} sr_mod_oper_get_xpath_sub_t;
+
+/**
+ * @brief Ext SHM module operational set of get subscriptions for given XPath.
  */
 typedef struct {
     off_t xpath;                /**< XPath of the subscription (offset in ext SHM). */
-    sr_mod_oper_sub_type_t sub_type;  /**< Type of the subscription. */
+    sr_mod_oper_get_sub_type_t sub_type; /**< Type of the subscription. */
+
+    off_t xpath_subs;           /**< Subscriptions array of the given XPath (offset in ext SHM) */
+    uint32_t xpath_sub_count;   /**< Number of subscriptions for given XPath */
+} sr_mod_oper_get_sub_t;
+
+/**
+ * @brief Ext SHM module operational poll subscription.
+ */
+typedef struct {
+    off_t xpath;                /**< XPath of the subscription (offset in ext SHM). */
     int opts;                   /**< Subscription options. */
     uint32_t sub_id;            /**< Unique subscription ID. */
-    uint32_t evpipe_num;        /** Event pipe number. */
+    uint32_t evpipe_num;        /**< Event pipe number. */
     ATOMIC_T suspended;         /**< Whether the subscription is suspended. */
     sr_cid_t cid;               /**< Connection ID. */
-} sr_mod_oper_sub_t;
+} sr_mod_oper_poll_sub_t;
 
 /**
  * @brief Ext SHM notification subscription.

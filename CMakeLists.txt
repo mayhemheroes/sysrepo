@@ -8,6 +8,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
 
 include(GNUInstallDirs)
 include(CheckSymbolExists)
+include(CheckIncludeFile)
 include(CheckLibraryExists)
 include(UseCompat)
 include(ABICheck)
@@ -63,22 +64,22 @@ endif()
 # minor version changes with added functionality (new tool, functionality of the tool or library, ...) and
 # micro version is changed with a set of small changes or bugfixes anywhere in the project.
 set(SYSREPO_MAJOR_VERSION 2)
-set(SYSREPO_MINOR_VERSION 1)
-set(SYSREPO_MICRO_VERSION 84)
+set(SYSREPO_MINOR_VERSION 2)
+set(SYSREPO_MICRO_VERSION 12)
 set(SYSREPO_VERSION ${SYSREPO_MAJOR_VERSION}.${SYSREPO_MINOR_VERSION}.${SYSREPO_MICRO_VERSION})
 
 # Version of the library
 # Major version is changed with every backward non-compatible API/ABI change, minor version changes
 # with backward compatible change and micro version is connected with any internal change of the library.
 set(SYSREPO_MAJOR_SOVERSION 7)
-set(SYSREPO_MINOR_SOVERSION 8)
-set(SYSREPO_MICRO_SOVERSION 10)
+set(SYSREPO_MINOR_SOVERSION 11)
+set(SYSREPO_MICRO_SOVERSION 8)
 set(SYSREPO_SOVERSION_FULL ${SYSREPO_MAJOR_SOVERSION}.${SYSREPO_MINOR_SOVERSION}.${SYSREPO_MICRO_SOVERSION})
 set(SYSREPO_SOVERSION ${SYSREPO_MAJOR_SOVERSION})
 
 # Version of libyang library that this sysrepo depends on
-set(LIBYANG_DEP_VERSION 2.0.228)
-set(LIBYANG_DEP_SOVERSION 2.22.1)
+set(LIBYANG_DEP_VERSION 2.1.3)
+set(LIBYANG_DEP_SOVERSION 2.25.3)
 set(LIBYANG_DEP_SOVERSION_MAJOR 2)
 
 # generate only version header, it is needed for docs
@@ -118,7 +119,27 @@ endif()
 set(NACM_RECOVERY_USER "root" CACHE STRING "NACM recovery session user that has unrestricted access.")
 set(NACM_SRMON_DATA_PERM "600" CACHE STRING "NACM modules ietf-netconf-acm and sysrepo-monitoring default data permissions.")
 
+# sr_cond implementation
+if(NOT SR_COND_IMPL)
+    check_include_file("linux/futex.h" HAS_FUTEX)
+    if(HAS_FUTEX)
+        set(SR_COND_IMPL "sr_cond_futex")
+    else()
+        set(SR_COND_IMPL "sr_cond_pthread")
+    endif()
+endif()
+message(STATUS "Conditional variable implementation: ${SR_COND_IMPL}")
+
 # paths
+if(NOT SHM_DIR)
+    if("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+        set(SHM_DIR "/tmp/shm")
+    else()
+        set(SHM_DIR "/dev/shm")
+    endif()
+endif()
+set(SHM_DIR "${SHM_DIR}" CACHE PATH "SHM file directory, contains all shared memory files.")
+
 if(NOT REPO_PATH)
     if("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG")
         set(REPO_PATH "${CMAKE_BINARY_DIR}/repository")
@@ -178,6 +199,7 @@ set(LIB_SRC
     src/shm_ext.c
     src/shm_mod.c
     src/shm_sub.c
+    src/sr_cond/${SR_COND_IMPL}.c
     src/plugins/ds_lyb.c
     src/plugins/ntf_lyb.c
     src/plugins/common_lyb.c
@@ -193,6 +215,9 @@ set (SYSREPOCFG_SRC
     src/executables/sysrepocfg.c)
 
 set (SYSREPOPLUGIND_SRC
+    src/executables/srpd_rotation.c
+    src/executables/srpd_oper_poll_diff.c
+    src/executables/srpd_common.c
     src/executables/sysrepo-plugind.c)
 
 # public headers to check API/ABI on
@@ -208,6 +233,8 @@ set(LIB_HEADERS
 set(DOXY_FILES
     doc/
     ${LIB_HEADERS}
+    src/plugins_datastore.h
+    src/plugins_notification.h
     ${PROJECT_BINARY_DIR}/version.h)
 
 # project (doxygen) logo
@@ -273,7 +300,7 @@ if(ENABLE_COVERAGE)
 endif()
 
 if ("${BUILD_TYPE_UPPER}" STREQUAL "DEBUG")
-    source_format_enable()
+    source_format_enable(0.75)
 endif()
 
 if("${BUILD_TYPE_UPPER}" STREQUAL "DOCONLY")
@@ -369,6 +396,12 @@ endif()
 check_symbol_exists(mkstemps "stdlib.h" SR_HAVE_MKSTEMPS)
 unset(CMAKE_REQUIRED_DEFINITIONS)
 
+# tar
+find_program(TAR_BINARY "tar")
+if(NOT TAR_BINARY)
+    message(FATAL_ERROR "tar binary was not found.")
+endif()
+
 # generate files
 configure_file("${PROJECT_SOURCE_DIR}/src/config.h.in" "${PROJECT_BINARY_DIR}/config.h" ESCAPE_QUOTES @ONLY)
 configure_file("${PROJECT_SOURCE_DIR}/src/plugins/common_lyb.h.in" "${PROJECT_BINARY_DIR}/common_lyb.h" ESCAPE_QUOTES @ONLY)
@@ -426,8 +459,8 @@ source_format(${FORMAT_SOURCES})
 
 # phony target for clearing sysrepo SHM
 add_custom_target(shm_clean
-    COMMAND rm -rf /dev/shm/sr_*
-    COMMAND rm -rf /dev/shm/srsub_*
+    COMMAND rm -rf ${SHM_DIR}/sr_*
+    COMMAND rm -rf ${SHM_DIR}/srsub_*
     COMMENT "Removing all volatile SHM files prefixed with \"sr\""
 )
 

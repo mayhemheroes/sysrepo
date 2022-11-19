@@ -25,7 +25,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/inotify.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
@@ -36,6 +35,10 @@
 #include "compat.h"
 #include "common_lyb.h"
 #include "sysrepo.h"
+
+#ifdef SR_HAVE_INOTIFY
+# include <sys/inotify.h>
+#endif
 
 #define srpds_name "LYB DS file"  /**< plugin name */
 
@@ -589,6 +592,7 @@ srpds_lyb_running_load_cached(sr_cid_t cid, const struct lys_module **mods, uint
             break;
         }
     }
+
     if (!cache) {
         /* CACHE UNLOCK */
         pthread_rwlock_unlock(&data_cache.lock);
@@ -600,9 +604,16 @@ srpds_lyb_running_load_cached(sr_cid_t cid, const struct lys_module **mods, uint
             goto cleanup;
         }
 
-        /* a new cache may have been added in the meantime */
-        i = data_cache.cache_count;
+        /* try to find it again after READ unlock/WRITE lock */
+        for (i = 0; i < data_cache.cache_count; ++i) {
+            if (data_cache.caches[i].cid == cid) {
+                cache = &data_cache.caches[i];
+                break;
+            }
+        }
+    }
 
+    if (!cache) {
         /* create cache for this connection */
         mem = realloc(data_cache.caches, (i + 1) * sizeof *data_cache.caches);
         if (!mem) {
@@ -644,31 +655,32 @@ srpds_lyb_running_load_cached(sr_cid_t cid, const struct lys_module **mods, uint
     }
 
     /* check module data */
-    rc = srpds_lyb_running_load_cached_mods(cache, mods, mod_count, &cache_update);
+    if ((rc = srpds_lyb_running_load_cached_mods(cache, mods, mod_count, &cache_update))) {
+        goto cleanup_unlock;
+    }
+
+    if (cache_update) {
+        /* cache needs to be updated first */
+        rc = SR_ERR_OPERATION_FAILED;
+    } else {
+        *data = cache->data;
+    }
 
 cleanup_unlock:
     /* CACHE UNLOCK */
     pthread_rwlock_unlock(&data_cache.lock);
 
 cleanup:
-    if (!rc) {
-        if (cache_update) {
-            /* cache needs to be updated first */
-            rc = SR_ERR_OPERATION_FAILED;
-        } else {
-            *data = cache->data;
-        }
-    }
     return rc;
 }
 
 static int
-srpds_lyb_running_update_cached(sr_cid_t cid, const struct lys_module **UNUSED(mods), uint32_t UNUSED(mod_count))
+srpds_lyb_running_update_cached(sr_cid_t cid, const struct lys_module **mods, uint32_t mod_count)
 {
     struct srlyb_cache_conn_s *cache = NULL;
     struct srlyb_cache_mod_s *cmod;
     struct lyd_node *mod_data;
-    uint32_t i;
+    uint32_t i, j;
     int rc = SR_ERR_OK;
 
     /* find the connection cache */
@@ -684,6 +696,16 @@ srpds_lyb_running_update_cached(sr_cid_t cid, const struct lys_module **UNUSED(m
         cmod = &cache->mods[i];
         if (cmod->current) {
             /* module data in the cache are current */
+            continue;
+        }
+
+        for (j = 0; j < mod_count; ++j) {
+            if (cmod->mod == mods[j]) {
+                break;
+            }
+        }
+        if (j == mod_count) {
+            /* data are not needed and we are not holding this module lock */
             continue;
         }
 
@@ -745,7 +767,6 @@ srpds_lyb_running_flush_cached(sr_cid_t cid)
     /* consolidate the cache */
     --data_cache.cache_count;
     if (i < data_cache.cache_count) {
-        SRPLG_LOG_ERR(srpds_name, "arg1 %p, arg2 %p, arg3 %u", data_cache.caches + i, data_cache.caches + i + 1, (data_cache.cache_count - i) * sizeof *data_cache.caches);
         memmove(data_cache.caches + i, data_cache.caches + i + 1, (data_cache.cache_count - i) * sizeof *data_cache.caches);
     } else if (!data_cache.cache_count) {
         free(data_cache.caches);
@@ -1105,6 +1126,34 @@ cleanup:
     return rc;
 }
 
+static int
+srpds_lyb_last_modif(const struct lys_module *mod, sr_datastore_t ds, struct timespec *mtime)
+{
+    int rc = SR_ERR_OK;
+    char *path = NULL;
+    struct stat buf;
+
+    if ((rc = srlyb_get_path(srpds_name, mod->name, ds, &path))) {
+        goto cleanup;
+    }
+
+    if (stat(path, &buf) == 0) {
+        mtime->tv_sec = buf.st_mtime;
+        mtime->tv_nsec = 0;
+    } else if (errno == ENOENT) {
+        /* the file may not exist */
+        mtime->tv_sec = 0;
+        mtime->tv_nsec = 0;
+    } else {
+        SRPLG_LOG_ERR(srpds_name, "Stat of \"%s\" failed (%s).", path, strerror(errno));
+        rc = SR_ERR_SYS;
+    }
+
+cleanup:
+    free(path);
+    return rc;
+}
+
 const struct srplg_ds_s srpds_lyb = {
     .name = srpds_name,
     .init_cb = srpds_lyb_init,
@@ -1128,4 +1177,5 @@ const struct srplg_ds_s srpds_lyb = {
     .access_set_cb = srpds_lyb_access_set,
     .access_get_cb = srpds_lyb_access_get,
     .access_check_cb = srpds_lyb_access_check,
+    .last_modif_cb = srpds_lyb_last_modif,
 };

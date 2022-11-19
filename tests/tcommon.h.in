@@ -1,11 +1,11 @@
 /**
- * @file test_common.h
+ * @file tcommon.h
  * @author Michal Vasko <mvasko@cesnet.cz>
  * @brief test configuration header
  *
  * @copyright
- * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2022 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2022 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@
 #define TESTS_SRC_DIR "@TESTS_SRC_DIR@"
 
 #define TESTS_REPO_DIR "@TESTS_REPO_DIR@"
+
+/* path to all compiled executables */
+#define SR_BINARY_DIR "@PROJECT_BINARY_DIR@"
 
 /** implemented ietf-yang-library revision (copied from common.h) */
 #define SR_YANGLIB_REVISION @YANGLIB_REVISION@
