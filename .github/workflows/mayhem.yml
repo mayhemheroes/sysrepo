@@ -51,7 +51,8 @@ jobs:
       fail-fast: false
       matrix:
         mayhemfile:
-          - mayhem/Mayhemfile
+          - mayhem/Mayhemfile_sr_log_syslog
+          - mayhem/Mayhemfile_sysrepocfg
 
     steps:
       - uses: actions/checkout@v2
