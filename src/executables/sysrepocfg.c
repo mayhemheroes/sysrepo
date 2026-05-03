@@ -127,8 +127,8 @@ error_ly_print(const struct ly_ctx *ctx)
     struct ly_err_item *e;
 
     for (e = ly_err_first(ctx); e; e = e->next) {
-        if (e->path) {
-            fprintf(stderr, "libyang error: %s (%s)\n", e->msg, e->path);
+        if (e->data_path || e->schema_path) {
+            fprintf(stderr, "libyang error: %s (%s)\n", e->msg, e->data_path ? e->data_path : e->schema_path);
         } else {
             fprintf(stderr, "libyang error: %s\n", e->msg);
         }
