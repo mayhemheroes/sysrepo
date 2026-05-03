@@ -4,8 +4,8 @@
  * @brief logging routines
  *
  * @copyright
- * Copyright (c) 2018 - 2024 Deutsche Telekom AG.
- * Copyright (c) 2018 - 2024 CESNET, z.s.p.o.
+ * Copyright (c) 2018 - 2021 Deutsche Telekom AG.
+ * Copyright (c) 2018 - 2021 CESNET, z.s.p.o.
  *
  * This source code is licensed under BSD 3-Clause License (the "License").
  * You may not use this file except in compliance with the License.
@@ -16,12 +16,9 @@
 
 #define _GNU_SOURCE
 
-#include "compat.h"
 #include "log.h"
-#include "shm_main.h"
 
 #include <assert.h>
-#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,6 +27,7 @@
 
 #include <libyang/libyang.h>
 
+#include "compat.h"
 #include "config.h"
 
 sr_log_level_t sr_stderr_ll = SR_LL_NONE;   /**< stderr log level */
@@ -123,10 +121,6 @@ sr_log_msg(int plugin, sr_log_level_t ll, const char *msg)
     case SR_LL_INF:
         priority = LOG_INFO;
         severity = "INF";
-        break;
-    case SR_LL_VRB:
-        priority = LOG_INFO;
-        severity = "VRB";
         break;
     case SR_LL_DBG:
         priority = LOG_DEBUG;
@@ -230,10 +224,6 @@ sr_errinfo_new(sr_error_info_t **err_info, sr_error_t err_code, const char *msg_
         /* there is no dynamic memory, use the static error structure */
         sr_errinfo_free(err_info);
         *err_info = &sr_errinfo_mem;
-    } else if (!msg_format) {
-        /* error without a message */
-        sr_errinfo_add(err_info, err_code, NULL, NULL, NULL, NULL);
-        return;
     } else {
         va_start(vargs, msg_format);
         sr_errinfo_add(err_info, err_code, NULL, NULL, msg_format, &vargs);
@@ -268,13 +258,102 @@ sr_errinfo_new_data(sr_error_info_t **err_info, sr_error_t err_code, const char 
 }
 
 void
+sr_errinfo_new_ly(sr_error_info_t **err_info, const struct ly_ctx *ly_ctx, const struct lyd_node *data)
+{
+    struct ly_err_item *e;
+    const struct lyd_node *node;
+
+    e = ly_err_first(ly_ctx);
+    if (!e && data) {
+        LYD_TREE_DFS_BEGIN(data, node) {
+            if (node->flags & LYD_EXT) {
+                e = ly_err_first(LYD_CTX(node));
+                break;
+            }
+            LYD_TREE_DFS_END(data, node);
+        }
+    }
+
+    /* this function is called only when an error is expected, but it is still possible there
+     * will be none -> libyang problem or simply the error was externally processed, sysrepo is
+     * unable to detect that */
+    if (!e) {
+        sr_errinfo_new(err_info, SR_ERR_LY, "Unknown libyang error.");
+        return;
+    }
+
+    do {
+        if (e->level == LY_LLWRN) {
+            /* just print it */
+            sr_log_msg(0, SR_LL_WRN, e->msg);
+        } else {
+            assert(e->level == LY_LLERR);
+            /* store it and print it */
+            if (e->data_path || e->schema_path) {
+                sr_errinfo_new(err_info, SR_ERR_LY, "%s (%s)", e->msg, e->data_path ? e->data_path : e->schema_path);
+            } else {
+                sr_errinfo_new(err_info, SR_ERR_LY, "%s", e->msg);
+            }
+        }
+
+        e = e->next;
+    } while (e);
+
+    ly_err_clean((struct ly_ctx *)ly_ctx, NULL);
+}
+
+void
+sr_errinfo_new_ly_first(sr_error_info_t **err_info, const struct ly_ctx *ly_ctx)
+{
+    struct ly_err_item *e;
+
+    e = ly_err_first(ly_ctx);
+    /* this function is called only when an error is expected */
+    assert(e);
+
+    if (e->level == LY_LLWRN) {
+        /* just print it */
+        sr_log_msg(0, SR_LL_WRN, e->msg);
+    } else {
+        assert(e->level == LY_LLERR);
+        /* store it and print it */
+        if (e->data_path || e->schema_path) {
+            sr_errinfo_new(err_info, SR_ERR_LY, "%s (%s)", e->msg, e->data_path ? e->data_path : e->schema_path);
+        } else {
+            sr_errinfo_new(err_info, SR_ERR_LY, "%s", e->msg);
+        }
+    }
+
+    ly_err_clean((struct ly_ctx *)ly_ctx, NULL);
+}
+
+void
+sr_log_wrn_ly(const struct ly_ctx *ly_ctx)
+{
+    struct ly_err_item *e;
+
+    e = ly_err_first(ly_ctx);
+    /* this function is called only when an error is expected */
+    assert(e);
+
+    do {
+        /* print everything as warnings */
+        sr_log_msg(0, SR_LL_WRN, e->msg);
+
+        e = e->next;
+    } while (e);
+
+    ly_err_clean((struct ly_ctx *)ly_ctx, NULL);
+}
+
+void
 sr_errinfo_free(sr_error_info_t **err_info)
 {
     size_t i;
 
     if (err_info && *err_info) {
-        /* NO_MEM is a static error info structure */
-        if (*err_info != &sr_errinfo_mem) {
+        /* NO_MEM is always a static error info structure */
+        if (((*err_info)->err_count != 1) || ((*err_info)->err[0].err_code != SR_ERR_NO_MEMORY)) {
             for (i = 0; i < (*err_info)->err_count; ++i) {
                 free((*err_info)->err[i].message);
                 free((*err_info)->err[i].error_format);
@@ -328,119 +407,6 @@ sr_log(sr_log_level_t ll, const char *format, ...)
     free(msg);
 }
 
-void
-sr_errinfo_new_lock(sr_error_info_t **err_info, const char *func, int eno, const sr_rwlock_t *rwlock)
-{
-    sr_error_info_t *tmp_err = NULL;
-    char *msg = NULL, *buf;
-    uint32_t i;
-    int conn_alive;
-    pid_t pid;
-    int r;
-
-    if (eno != ETIMEDOUT) {
-        sr_errinfo_new(err_info, SR_ERR_SYS, "Locking a mutex failed (%s: %s).", func, strerror(eno));
-        return;
-    }
-
-    if (rwlock->writer) {
-        /* add writer lock info */
-        if ((tmp_err = sr_shmmain_conn_check(rwlock->writer, &conn_alive, &pid))) {
-            goto cleanup;
-        }
-        if (conn_alive) {
-            r = asprintf(&msg, "Locking a rwlock failed (%s: %s), writer lock held by running process %ld (CID %" PRIu32 ").",
-                    func, strerror(eno), (long)pid, rwlock->writer);
-        } else {
-            r = asprintf(&msg, "Locking a rwlock failed (%s: %s), writer lock held by a dead process (CID %" PRIu32 ").",
-                    func, strerror(eno), rwlock->writer);
-        }
-        SR_CHECK_MEM_GOTO(r == -1, *err_info, cleanup);
-    } else if (rwlock->readers[0]) {
-        /* add all readers lock info */
-        r = asprintf(&msg, "Locking a rwlock failed (%s: %s), read lock held by", func, strerror(eno));
-        SR_CHECK_MEM_GOTO(r == -1, *err_info, cleanup);
-
-        for (i = 0; (i < SR_RWLOCK_READ_LIMIT) && rwlock->readers[i]; ++i) {
-            if ((tmp_err = sr_shmmain_conn_check(rwlock->readers[i], &conn_alive, &pid))) {
-                goto cleanup;
-            }
-
-            if (conn_alive) {
-                r = asprintf(&buf, "%s%s running process %ld (CID %" PRIu32 ")", msg, i ? "," : "", (long)pid,
-                        rwlock->readers[i]);
-            } else {
-                r = asprintf(&buf, "%s%s a dead process (CID %" PRIu32 ")", msg, i ? "," : "", rwlock->readers[i]);
-            }
-            SR_CHECK_MEM_GOTO(r == -1, *err_info, cleanup);
-            free(msg);
-            msg = buf;
-        }
-
-        r = asprintf(&buf, "%s.", msg);
-        SR_CHECK_MEM_GOTO(r == -1, *err_info, cleanup);
-        free(msg);
-        msg = buf;
-    } else {
-        /* cannot time out without a held lock */
-        SR_ERRINFO_INT(err_info);
-        goto cleanup;
-    }
-
-    /* create err_info */
-    sr_errinfo_new(err_info, SR_ERR_TIME_OUT, "%s", msg);
-
-cleanup:
-    sr_errinfo_merge(err_info, tmp_err);
-    free(msg);
-}
-
-API void
-srplg_log_errinfo(sr_error_info_t **err_info, const char *plg_name, const char *err_format_name, sr_error_t err_code,
-        const char *format, ...)
-{
-    va_list vargs;
-    char *msg;
-    int idx;
-
-    if (!plg_name) {
-        return;
-    }
-
-    /* add plugin name first */
-    if (asprintf(&msg, "%s: %s", plg_name, format) == -1) {
-        *err_info = &sr_errinfo_mem;
-    } else {
-        /* add err_info */
-        va_start(vargs, format);
-        sr_errinfo_add(err_info, err_code, err_format_name, NULL, msg, &vargs);
-        va_end(vargs);
-    }
-
-    /* print it */
-    idx = (*err_info)->err_count - 1;
-    sr_log_msg(1, SR_LL_ERR, (*err_info)->err[idx].message);
-    free(msg);
-}
-
-API int
-srplg_errinfo_push_error_data(sr_error_info_t *err_info, uint32_t size, const void *data)
-{
-    sr_error_info_t *einfo = NULL;
-
-    SR_CHECK_ARG_APIRET(!err_info || !err_info->err_count || !err_info->err[err_info->err_count - 1].error_format ||
-            !size || !data, NULL, einfo);
-
-    einfo = sr_ev_data_push(&err_info->err[err_info->err_count - 1].error_data, size, data);
-    return sr_api_ret(NULL, einfo);
-}
-
-API void
-srplg_errinfo_free(sr_error_info_t **err_info)
-{
-    sr_errinfo_free(err_info);
-}
-
 API void
 srplg_log(const char *plg_name, sr_log_level_t ll, const char *format, ...)
 {
@@ -477,6 +443,9 @@ sr_strerror(int err_code)
 API void
 sr_log_stderr(sr_log_level_t log_level)
 {
+    /* initializes libyang logging for our purpose */
+    ly_log_options(LY_LOSTORE);
+
     sr_stderr_ll = log_level;
 }
 
@@ -489,6 +458,9 @@ sr_log_get_stderr(void)
 API void
 sr_log_syslog(const char *app_name, sr_log_level_t log_level)
 {
+    /* initializes libyang logging for our purpose */
+    ly_log_options(LY_LOSTORE);
+
     sr_syslog_ll = log_level;
 
     if ((log_level > SR_LL_NONE) && !syslog_open) {
