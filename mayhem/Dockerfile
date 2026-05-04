@@ -1,7 +1,7 @@
 FROM --platform=linux/amd64 ubuntu:22.04 as builder
 
-RUN apt-get update
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential cmake git libpcre2-dev clang
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing \
+    build-essential cmake git libpcre2-dev clang
 
 RUN git clone https://github.com/CESNET/libyang
 WORKDIR /libyang/build
