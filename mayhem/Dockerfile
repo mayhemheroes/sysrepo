@@ -5,7 +5,7 @@ RUN echo "Acquire::Retries \"5\";" > /etc/apt/apt.conf.d/80retries && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential cmake git libpcre2-dev clang
 
-RUN git clone https://github.com/CESNET/libyang
+RUN git clone --depth=1 --branch v2.1.4 https://github.com/CESNET/libyang
 WORKDIR /libyang/build
 RUN cmake .. -DCMAKE_INSTALL_PREFIX=/install
 RUN make -j8
